@@ -1,0 +1,22 @@
+# Build output
+build/
+DerivedData/
+
+# Xcode per-user state
+xcuserdata/
+*.xcuserstate
+
+# Backups of real session data (player names): keep local only
+ipad-backup-*/
+sessions.json
+
+.DS_Store
+
+# Local Netlify folder
+.netlify
+node_modules
+
+# Web app
+node_modules/
+dist/
+.netlify/
