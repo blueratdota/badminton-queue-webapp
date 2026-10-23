@@ -83,7 +83,7 @@ function Toolbar() {
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => openModal({ type: 'sessionPlayers' })}><UsersRound />Session Players</DropdownMenuItem>
           <DropdownMenuItem onSelect={() => openModal({ type: 'allPlayers' })}><Users />All Players</DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => openModal({ type: 'pairing' })}><Link2 />Increase Pairing %</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => openModal({ type: 'pairing' })}><Link2 />Locked Teammates</DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={exportData}><Download />Export Data</DropdownMenuItem>
           <DropdownMenuItem onSelect={() => file.current.click()}><Upload />Import Data</DropdownMenuItem>

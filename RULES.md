@@ -1,31 +1,40 @@
 # Shuttle Queue: how the app works
 
-The rules the iPad app and the web app (`src/engine.js`) follow, as of Oct 10, 2026. Both are kept in sync.
+The rules the iPad app and the web version follow, as of Oct 23, 2026. Both are kept in sync.
 
 ---
 
 ## 1. Sessions, courts and players
 
+- **Main menu:** the app opens on **Create New Session**, **All Players**, the **Live Sessions** (several can run at once) and **Past Sessions** (ended ones). Tap a session to open its dashboard (courts, Up Next and the queue); its back button returns to the menu. Long-press a session (or use its buttons on the web) to delete it, or to reopen a past one.
+- **Create New Session:** a name (blank shows the date), the number of courts (all doubles, changeable per court), the planned length in hours, and the players: **Copy Players from a Session** checks everyone from that session, and anyone can be checked or unchecked from the list of all players. Everyone starts as not here. Locked teammates carry over when both partners come from the copied session. Game counts start at zero, ratings carry over (latest rating).
+- **Dashboard layout:** iPad mini portrait keeps one column of courts beside the queue; landscape fits two court columns when there is room. The web app also works on phones and laptops: narrow screens use **Courts / Queue** tabs, and wider screens show both together. Court cards show **Playing**, **Ready** or **Waiting** (ended sessions show **Ended**), with full-contrast player names. **Start Ready Courts** starts the displayed lineups. The sidebar's **After this game · projected** lineups are estimates for busy courts; ready lineups appear on their court cards. Tournament Up Next remains in the sidebar.
+- **Shuttle animation:** playing courts keep the animated shuttlecock, its shadow and flight arc. Each court has its own rally speed (0.9–1.55 seconds per shot) with varied landing positions and arc heights on each shot. Redrawing keeps its flight continuous. Reduce Motion hides the animation.
+- **Inside a session:** Standings (trophy), Session Players (person-plus menu) and **Session Settings** (⚙︎) belong to that session only.
+- **Session Settings:** name, length, **End Session** (or **Reopen Session** when ended), **Delete Session**, Mode (Queue or Tournament), Courts (count and Add Court), Locked Teammates, Appearance, and This iPad copy.
 - **Session:** one night of play. It keeps its own players, courts, results and (optionally) a tournament.
-  - **New session with same players** copies the players and courts. Game counts start at zero, ratings carry over, and everyone plays "Any".
-  - **New empty session** keeps the courts only.
-  - Earlier sessions can be reopened or deleted (a delete asks for confirmation).
+  - **Length:** once the first game starts, the queue panel shows "until 9:30 PM · 1 hr, 20 min left" (on the menu too). It's a reminder only; nothing stops at the end.
+  - **End Session** closes it: games still on court are cancelled (the confirmation says how many, so they can be finished first), and it moves to Past Sessions marked "Ended" with the time. An ended session can be opened to see its standings and history; Start and Fill are off until it's reopened.
+  - Deleting a session asks for confirmation and can't be undone.
+  - An empty session takes the date its first player is added.
+  - Data saved before live sessions existed: the session that was open stays live, and every earlier one counts as ended.
 - **Courts:** a new app starts with Court 1 (doubles) and Court 2 (singles).
-  - Each court is set to Singles or Doubles and can be changed while it isn't playing.
-  - Add Court adds a doubles court. A court can be removed from its ⋯ menu when it isn't playing.
+  - Each court is set to Singles or Doubles (the one-person / two-people switch) and can be changed while it isn't playing.
+  - Add Court (Settings) adds a doubles court. A court can be removed from its ⋯ menu when it isn't playing; it asks first, and its games stay in Match History.
 - **Players:** each has a name, a rating from 1.0 to 5.0 (shown as dots), and what they play: Any, Singles or Doubles.
+  - The level buttons (Add Player, Edit Player's "Set level") set **New 1.0, Beginner 1.75, Intermediate 2.5, Advanced 3.5, Strong 4.5**. The level name and dots follow the rounded rating (2.5–3.4 is Intermediate, 3 dots).
   - Names are unique within a session (ignoring upper/lower case).
-  - Add players from the person-plus button in the top bar: **New Player**, or **From Earlier Sessions** (brings back their latest rating).
-  - **Session Players** (⚙︎ menu): everyone in this session with where they are (on a court, waiting and their place in line, or sitting out), games, what they play and rating. Tap a player to edit them; add players from the top of the list (New Player or From Earlier Sessions).
-- **All Players** (⚙︎ menu) lists everyone ever registered, with their latest rating, sessions, games and wins.
-- **Queue actions:** tap a player to edit their name, rating, what they play, or sit them out. Press and hold for:
+  - Add players from the person-plus button on the Dashboard: **New Player**, or **From Earlier Sessions** (brings back their latest rating).
+  - **Session Players** (Home, or the Dashboard's person-plus menu): everyone in this session with where they are (on a court, waiting and their place in line, or sitting out), games, what they play and rating. Tap a player to edit them; add players from the top of the list (New Player or From Earlier Sessions).
+- **All Players** (main menu) lists everyone across all sessions, with their latest rating, sessions, games and wins. Tap someone to change their name or rating: it changes in every session they're in, past ones included (games already played keep the rating changes they recorded).
+- **Minutes waited:** each queue row shows how long that player has been waiting ("7 played · 12 min"), on the wait rule's clock: since their last game or arrival, never before the session's first game, and sitting out doesn't restart it. It turns orange at 20 minutes, when the wait rule puts them in the next game.
+- **Queue actions:** queue rows prioritize name, games played and minutes waited. Tap a player to edit their name, rating, what they play, or sit them out. Tap **⋯** or press and hold for:
   - Edit Name or Rating
   - Sit Out / Back In
   - Move to Front
   - Remove from Session (asks for confirmation)
-- **Appearance** (⚙︎ menu): System, Light or Dark.
-- **This iPad copy** (⚙︎ menu, iPad only): how many days are left before the installed copy must be reinstalled from Xcode, read from its signing profile (7 days on a free developer account).
-- **Increase Pairing %** (⚙︎ menu): set partner requests (see §5). They're kept off the main screen.
+- **Appearance** (Settings): System, Light or Dark.
+- **This iPad copy** (Settings, iPad only): how many days are left before the installed copy must be reinstalled from Xcode, read from its signing profile (7 days on a free developer account).
 
 ## 2. The queue: who plays next
 
@@ -46,12 +55,14 @@ Other queue rules:
 ## 3. Present, and late arrivals
 
 - **Present:** players in a new session, and anyone added before the first game, start as **not here**. They're listed under **Not Here Yet** below the queue and aren't picked. Tap **Here** when they arrive (or turn on Present in Edit Player). Before the first game, they line up in the order they arrive.
-- **Not Here** (press and hold a player in the queue) takes someone out of the line, for example if they were marked present by mistake. They don't count toward the pair-request player minimum or tournaments.
+- **Not Here** (press and hold a player in the queue) takes someone out of the line, for example if they were marked present by mistake. They aren't included in tournaments.
 - **Don't use Sit Out for someone who hasn't arrived.** Sitting out keeps the wait clock running and the game count at 0, so they'd jump the line and catch up on games when they come back.
 
 A player marked present, or added, after the session has started:
-1. **Goes first once.** They go behind anyone still on 0 games (including earlier late arrivals who haven't played yet), then ahead of everyone who has played. If nobody is on 0 games, they go straight to the front.
+1. **Goes first once, while it's a trickle.** They go behind anyone still on 0 games (including earlier late arrivals who haven't played yet), then ahead of everyone who has played. If nobody is on 0 games, they go straight to the front. Once **4 late arrivals** are already waiting for their first game, anyone arriving after that joins **at par, in arrival order** (behind people already waiting) instead, so a wave of arrivals doesn't take over the courts.
+   - **At most 2 late arrivals on their first game in one game**, mixed with players already in the rotation (unless nobody else can make the game). On Oct 11, about 12 players arrived within 15 minutes and filled three courts in a row, while the players who had started at 6:09 waited 27–30 minutes for their second game; a replay of that night with these rules cut courts taken over by late arrivals from 2.4 to 0.0 a night, and late arrivals waited about 2.5 minutes longer for their first game (8.8 instead of 6.4).
 2. **Gets an arrival credit:** they count as having played as many games as the least-played player who has played, so they have no missed games to catch up on. Players still on 0 games don't lower this.
+   - **Only from 30 minutes after the first game.** Anyone arriving before then counts as on time: no credit, so they're on 0 games and play next, ahead of everyone who has played. (On Oct 17 the organiser put such arrivals in by hand; the app now does it.)
 3. **Joins the normal order after their first game.** Fewest games counted, then longest rested.
 4. **Their wait clock** (§6) starts when they arrive.
 
@@ -75,25 +86,26 @@ For each open doubles court, the **first player in line always plays**. The othe
 3. **Balanced teams from the nearest ratings:** mixed levels, choosing the four whose ratings are closest together, with team averages within 0.75 of each other. Used when no similar or wider group works.
 4. **Any fair four from the front of the line,** as a last resort.
 
-**Too few players for similar groups:** when every court is doubles and fewer than **8 players per court** are here (16 for 2 courts, 24 for 3; anyone sitting out or not here yet doesn't count), steps 1–2 are skipped. Each game is the first in line plus the next players in line (fewest games, then longest rested) who make even teams (averages within 0.75), avoiding heavy repeats, with no preference for similar ratings. The queue footer says when this is on, and it switches back automatically once enough players are here.
-- **In a simulation** of 14 players on 2 courts over 100 nights: most-minus-fewest games was 1 on 67% of nights (15% with similar groups) and never 3 (10%); the same four met again 0.5 times a night (2.3). The cost is skill range: all four within 1 level in 15% of games (41%), average team gap 0.37 (0.25). Waits were unchanged.
+**Even games:** nobody plays again while someone with fewer games is left waiting. The four in a game all have no more games than the fewest among everyone else waiting (counting a late arrival's credit, so late arrivals count at par). Steps 1–4 then run among those players, so similar groups still form whenever counts allow, and near the end of each round games mix levels instead of leaving someone behind. Exception: if the even game would bring back four who all met lately (6+ repeat points), the usual pick is used if it repeats less. If no game passes, the rule is dropped for that game.
+- **In a simulation** of 21 real players on 3 courts, 2 hours, 100 nights: someone ended 2+ games behind on 3% of nights (63% for similar groups without this rule), with all four within 1 level in 36% of games (37%) and the same four again 0.19 times a night (0.11). Waits were unchanged (longest 27 minutes).
+
+**Too few players for similar groups:** when every court is doubles and fewer than **6.25 players per court** are here (13 for 2 courts, 19 for 3, 25 for 4; anyone sitting out or not here yet doesn't count), steps 1–2 are skipped. Each game is the first in line plus the next players in line (fewest games, then longest rested) who make even teams (averages within 0.75), avoiding heavy repeats, with no preference for similar ratings. The queue footer says when this is on, and it switches back automatically once enough players are here.
+- **Why 6.25:** with the even-games rule, similar groups beat balanced teams from 18–19 players on 3 courts. In the simulation of the same 21 players, all four within 1 level went from 16% of games (balanced) to 36%, games spread over 2 levels from 15.3 to 5.6 a night, and nights with someone 2+ games behind from 19% to 3%. The same four met again 0.19 times a night (0.06). On 2 courts at 13–14 players and on 4 courts at 25–26, similar groups also gave more games within 1 level (33–49% against 25–31%) with game counts as even or more even. Below about 17 players on 3 courts, similar groups don't help.
 
 Within those steps:
 - **Rest first.** Nobody who just came off court (the four from the most recently finished game) is called straight back while four rested players are waiting. This beats skill match and even teams: if the rested players can't make teams within 0.75, the evenest four of them play anyway, strongest teamed with weakest ("uneven teams so nobody goes straight back"). The first in line and anyone overdue still always play.
-- **Avoiding repeats.** "Recent" means each player's last 2 doubles games. Each pair of the four who shared a recent game costs 1 point. Each team that partnered recently costs 2 more.
+- **Avoiding repeats.** "Recent" means each player's last 3 doubles games. Each pair of the four who shared a recent game costs 1 point. Each team that partnered recently costs 2 more.
   - At **3 or more points** (a rematch of the same four always is), the app tries the next step up.
   - Below that, repeats only break ties (see below).
 - **Fewest games first.** Among groups that call nobody straight back and don't repeat too much, the other three are the ones with the fewest games (counting a late arrival's credit), then fewer repeat points, then whoever has waited longest. Without this, mid-rated players got pulled into far more games than the strongest and weakest (about 7.6 against 6.6 a night); now everyone gets about 6.9–7.4. In the balanced-teams step, the nearest ratings (in quarter levels) come first, then fewest games.
 - **Team split:** the fairest way to split the four into two teams, with team averages within 0.75. The two strongest are never put together when a fair split exists.
-- **Partner requests** (⚙︎ menu, Increase Pairing %). The screen lists existing requests with their status ("Waiting" or "Played together"); tap **Add Pair Request** to pick a player and a partner who don't have one yet, or the trash button to remove one. It works both ways. Nothing on the main screen shows it.
-  - **One game together per session, guaranteed.** After each has played one game, the pair is teamed up once, then they're treated exactly like any two players: no forcing, no keeping apart.
-  - **Even teams:** their game has team averages within 0.25 of a level (by the ratings at the time). The rating range may be wider than usual, so far-apart pairs still get their game.
-  - **One pair game at a time:** no pair game is lined up while another is playing or already lined up, and a pair never plays against another requested pair.
-  - **When:** one of the pair is about to play (picked for the game, or in the front four of the line), and the other is rested. The partner and the other two players come from the first 8 in line, then the first 12, then anyone waiting if no even game can be made otherwise. The person first in line still plays, as in any game, and nobody is called straight back on court to fit the pair in.
-  - **Until their game,** the normal matching won't make them teammates (they can still meet as opponents), so it only happens as the planned, even game.
-  - **Shuffle** on a pair's game first tries up to 3 games with different other players, then the normal games.
-  - **Enough players needed:** at least twice the players one round of courts takes, minus two: 14 for 2 doubles courts, 22 for 3, 30 for 4 (a singles court counts 2). People sitting out don't count. Below that, requests are kept but on hold and Add Pair Request is greyed out.
-  - **In a simulation** of 26 players, 3 courts and 6 pairs over 100 nights, each pair got its game on 98–100 nights, about an hour in. No two pair games overlapped, waits were unchanged, and games within 1 level went from 67% to 63%.
+- **Pair requests:** the old Increase Pairing % feature has been removed. Old requests no longer affect matching. Use Locked Teammates for players who should stay together.
+- **Locked teammates** (Settings, Locked Teammates): two players who always play doubles as a team. The queue row shows "with" their teammate; the sheet lists each pair with its status and average, **Add Locked Pair** picks two doubles players who aren't locked yet.
+  - **Opponents:** a team whose average (real ratings) is at least theirs, within 0.05. The app searches the full waiting line. Normal rest protection still applies, and no player in a locked-team game can be more than **1 counted game ahead** of the fewest among those waiting. If no suitable match is available once either partner has waited **20 minutes**, the lock temporarily relaxes and they can be selected independently; this starts early to help meet the 30-minute wait target. If an unmatchable pair falls **2 games behind** another waiting player, the lock relaxes sooner so they can catch up. Other players can fill the court while they wait.
+  - **After 3 wins in a row together**, each must play one game without the other as teammate. They are selected independently and do not wait for each other’s court to finish. They may naturally face each other, but the app does not require that; the lock resumes after both have played.
+  - **In line:** the pair stands side by side. If nothing fair keeps the lock, a pair at the front (or overdue) gets a game built around them with two others; otherwise they wait for the next game. A locked pair is overdue together, and at most one locked pair has to play in a game.
+  - **One missing:** while one is sitting out or not here, the other plays like anyone else. While one is still on court, the other waits for them, up to 20 minutes, except during a three-win cooldown.
+  - New sessions copied from this one keep the locks when both come along.
 - **Court notes** say why when it isn't a plain similar-skill game:
   - "wider skill range for new partners"
   - "wider skill range so nobody goes straight back"
@@ -102,12 +114,14 @@ Within those steps:
   - "uneven teams so nobody goes straight back"
   - "mixed teams, no similar group free"
 
-## 6. Nobody waits over 30 minutes
+## 6. Keeping waits near 30 minutes
 
-- **The limit:** nobody should wait more than **30 minutes** between games. Waiting counts from when they last finished a game or arrived; sitting out doesn't restart it.
-- **How:** anyone who has waited **20 minutes or more** plays in the next game of their format, up to a full court. If more than a court's worth are overdue, **fewest games first**, then longest wait. A late arrival counts at par here (the games they missed don't put them ahead). It starts at 20, not 30, because a court still has to free up.
+- **The limit:** nobody should wait more than **30 minutes** between games. Waiting counts from when they last finished a game or arrived; sitting out doesn't restart it. Nothing counts before the session's first game starts, so leaving the app open before play begins doesn't make everyone overdue (which used to lock the lineup and stop Shuffle from changing it).
+- **Locked-pair exception:** if no equal-or-higher-rated match passes the queue protections at 20 minutes, locked teammates become eligible independently. A court still has to free up, so 30 minutes is a target, not a guaranteed maximum.
+- **How:** anyone who has waited **20 minutes or more** plays in the next game of their format, up to a full court. If more than a court's worth are overdue, **fewest games first**, then longest wait, until someone reaches 30 minutes. At **30+ minutes**, longest waiting takes priority over game counts so catching others up cannot leave someone waiting indefinitely. A late arrival counts at par here (the games they missed don't put them ahead). It starts at 20, not 30, because a court still has to free up.
 - **Worst case for that game:** the usual skill steps first (within 1 level, then 1.5); if those don't work, balanced teams with all four **within 2 levels**. Only if nobody at all is free within 2 levels does it go wider, so the waiting player still plays.
-- **The rest of the game** is chosen by the normal rules around them. The court shows it, for example "Next up · Gino waited 20+ min".
+- **The rest of the game** is chosen by the normal rules around them. The court names them only once they've waited **25+ minutes**, for example "Next up · Gino waited 25+ min" (at 20 it showed on about half of all games).
+- **If the overdue players can't make even teams together,** as many of them play as even teams allow, longest waiting first; the rest go in the next game. The court note names only the overdue players actually in the game.
 - **In a simulation** (2 courts, 3 hours, 30 nights): with 18 players the longest wait was 27 minutes (38 when this rule started at 40), with no loss of skill match. With 22 players the longest was 31 minutes (51 before), and games within 1 level dropped from 62% to 53%: on a crowded night, keeping waits short costs some skill match.
 
 ## 7. Singles matching
@@ -139,10 +153,11 @@ Within those steps:
 
 ## 9. Games and results
 
-- **Start** begins the court's next game. A court with a game in progress glows softly orange. **Fill Open Courts** starts every open court.
+- **Start** begins the court's next game: exactly the four on screen, while they're all still free. (The screen updates when something changes; someone who reaches 20 minutes in between plays in the following game instead of swapping in on Start.) A court with a game in progress glows softly orange, shows the names a little smaller, and a shuttle rallies between them (off with Reduce Motion). **Fill Open Courts** starts every open court.
 - **Undo Start** (⋯ menu) cancels a started game as if it never began.
-- **Finish Game** asks who won. **No result** counts as played for both teams but doesn't change ratings. In a tournament, a no-result game is replayed.
-- **Deleting a game** in Match History removes it and exactly undoes its rating change.
+- **Manual mode** (⋯ menu → **Choose Players**): pick every player for a court's next game yourself, slot by slot (Team A, Team B), from the players waiting, in queue order. The court never shuffles them and the automatic picks for other courts leave them alone; Start is available once every slot is filled. When that game finishes (with a winner) the court goes back to automatic. A cancelled game or Undo Start keeps the chosen players. **Back to Automatic** (⋯ menu or the sheet) ends it early. Not in tournaments.
+- **Finish Game** asks who won, or **Cancel Game (no result)**. A cancelled game shows as "Cancelled" in Match History but isn't a game: it doesn't count towards anyone's games (queue order, Played, Standings), partners, repeats, streaks or ratings, and its four players go back exactly where they were in line, wait clocks still running, as with Undo Start. In a tournament, a cancelled game is replayed.
+- **Editing a game** in Match History (tap it): change who won, mark it cancelled, or delete it. A corrected result undoes the rating change the game made and applies the right one, worked out as when a game finishes; deleting exactly undoes it. Places in line don't change. A tournament game can only be deleted, since its winner already moved the bracket on.
 
 ## 10. Ratings
 
@@ -156,27 +171,31 @@ Within those steps:
   | 1 level apart | ±0.07 | ±0.23 |
   | 2 levels apart | ±0.03 | ±0.27 |
 
-- **Doubles partners** get the same change.
-- **Game length** nudges it by up to ±5%. A quick game counts as one-sided, a long one as close. Lengths are compared with this session's median for that format.
+- **How fast ratings settle:** a **new player's first 8 rated games** move **1.5×** as much, so they find their level quickly; **regulars** move **0.75×**, so one good or bad night doesn't swing them far. "New" means added with New Player; everyone already in the app counts as a regular. In a 4-night simulation, new players ended closer to their true level (0.40 off instead of 0.46) and regulars changed 0.21 a night instead of 0.28.
+- **Doubles partners** get the same change, scaled by each one's speed.
+- **Game length doesn't count**: a win moves ratings the same whether it took 6 minutes or 20 (games to 11 and to 21 points differ that much).
 - **Limits:** ratings stop at 1.0 and 5.0. The change actually applied is stored, so deleting a game undoes it exactly.
+- **Streaks (matching only):** a player on **3 wins in a row** is matched as if rated **0.5 higher**, **+0.5 more for each further win**, up to **+1.5**; losing streaks the same, lower. Everything that matches players treats the boosted number as their rating: the automatic games, hot/cold teaming, Lock + Shuffle, and Replace ("best fit" and "makes it uneven"). Their real rating, the dots on screen and rating changes are untouched; a cancelled game is skipped. **Shown on the rating dots** (queue, courts, Session Players, Replace): on a win streak the next empty dots fill **red** by the boost, half a dot per 0.5; on a losing streak the top filled dots turn **blue** the same way; when there's no room (a 5.0 on a win streak, or more loss than dots), every filled dot gets its own red or blue ring. In Replace, someone on a win streak can be a best fit and is marked "on a win streak".
+- **Hot/cold teaming:** when a player on a win streak (or a losing streak) is about to play, and a player on the opposite streak **within 1.0 level** (real ratings) is resting near the front of the line (first 8, then 12), they're **teammates**. The other two make teams **within 0.25** of each other, and all four stay within 2 levels. All of these are judged on boosted ratings, so most hot/cold teams are a weaker player on a win streak with a stronger player on a losing streak (about 1 a night in an Oct 11 replay; judging on real ratings gave about 4, with the same game quality). The first in line still plays, nobody is called straight back, and there's no court note. Shuffle offers it first, then the normal games.
+  - **Chosen by simulation** with players' form drifting game to game (so streaks mean something): partners further apart than 1.0 level only made games wider; a flat ±1.5 boost made games less even and cut similar-skill games from 63% to 56%. A 3-game streak says little in doubles (four players decide each result), so the boost starts small. In a replay of the Oct 11 night: about 4 hot/cold games a night, similar-skill games 64% (69% with no streak rules), on-time players ending within 1 game of each other 77% of nights (88% with no streak rules).
 
 ## 11. Standings
 
-- **Ranked by Score** (0–100, one decimal), then wins. Players who haven't played are listed last.
+- **Ranked by Score** (0–100, one decimal), **among players with enough games**: at least three quarters of the session's typical night (75% of the median games played, rounded up; today's Oct 19 night: median 9, so 7). Only ranked players can be on the podium. Players with fewer games (late arrivals, early leavers) are listed under **Not ranked · played under N**, then anyone who hasn't played. Without this, two players who won all 4 of their games and left topped a night where most played 9–11.
 - **Score:**
-  - Each win counts 0.93 (long, close game) to 1.0 (quick, one-sided game).
-  - Each loss counts 0.1 (close) down to 0 (one-sided).
-  - Everyone starts with 2 extra wins and 2 extra losses (a score of 50), so one or two lucky games can't top the table.
-  - "No result" games don't count.
-- **Podium:** the top 3 who have at least one win, shown 2nd · 1st · 3rd on an arena stage (floodlights, net and posts, court lines, a shuttle's flight, crossed rackets), with a gold shuttlecock above the winner and medal-coloured initials.
+  - The win rate, with 2 extra wins and 2 extra losses for everyone (a score of 50 to start), so one or two lucky games can't top the table: (wins + 2) ÷ (games + 4) × 100.
+  - **Game length doesn't count**: games to 11 points and to 21 last very different times, so a quick win isn't worth more.
+  - **Draws:** equal scores share a place, and the next score takes the next place (1, 1, 1, 2, 3, 3). On the podium, everyone sharing a place stands on that step together.
+  - Cancelled games don't count.
+- **Podium:** the top 3 places (with at least one win; a shared place puts everyone on the same step), shown 2nd · 1st · 3rd on an arena stage (floodlights, net and posts, court lines, a shuttle's flight, crossed rackets), with a gold shuttlecock above the winner and medal-coloured initials.
 - **The list** shows each player's rank, in gold, silver and bronze for the top 3; anyone yet to play has no rank.
 - **Columns:** Won, Played, Win % (rounded) and Score.
-- **Match History** lists every game with court, time, length and winner. It's where games are deleted.
+- **Match History** lists every game with court, time, length and winner. Tap a game to edit it (see Finish Game above).
 - **Standings open full screen.**
 
 ## 12. Tournament mode
 
-- **Switch** from Queue to Tournament and choose singles or doubles, and Top 4 or Top 8 (Top 8 needs 8+ sides).
+- **Switch** from Queue to Tournament in Settings (Mode) and choose singles or doubles, and Top 4 or Top 8 (Top 8 needs 8+ sides).
 - **Doubles teams** pair the strongest player with the weakest, the second strongest with the second weakest, and so on. With an odd number, the middle-rated player sits out. Players sitting out aren't included.
 - **Round robin:** everyone plays everyone once. Seeds are fixed when it ends, by wins; ties go to the higher-rated side.
 - **Bracket:** double elimination with upper and lower brackets. A side is out after two losses, and the upper and lower winners meet in a single Grand Final with no reset.
@@ -190,14 +209,18 @@ Within those steps:
 | Similar skill, doubles | within 1.0 level |
 | Wider range, doubles | within 1.5 levels |
 | Fair teams | team averages within 0.75 |
-| Balanced-only mode | under 8 players per court, all courts doubles |
+| Balanced-only mode | under 6.25 players per court, all courts doubles |
+| Even games | nobody plays again while someone with fewer games waits; gives way to a 6+ point repeat |
 | Singles opponent range | 1.0 level |
-| Repeat memory | last 2 games per player |
+| Repeat memory | last 3 games per player |
 | Repeat limit | 3 points |
-| Longest wait | 30 minutes (players waiting 20+ minutes play next) |
+| Standings ranking | at least 75% of the median games played (`rankShare`) |
+| Wait target | 30 minutes; priority from 20 minutes, longest waiting first at 30+, named on court at 25+ |
+| Late arrivals | credit only from 30 minutes after the first game; first 4 waiting go first, the rest at par; at most 2 per game |
 | Overdue game, worst case | within 2 levels, balanced teams |
-| Partner request | one game together per session; team averages within 0.25 |
-| Rating: most one game moves | 0.3 |
+| Locked teammates | opponents' average at least theirs (within 0.05); locked-game players at most 1 counted game ahead; unmatchable pairs released at 20 minutes or when 2 games behind; no teaming until each plays once after 3 consecutive wins together |
+| Rating: most one game moves | 0.3 (×1.5 for a new player's first 8 games, ×0.75 for regulars) |
+| Streak boost (matching only) | ±0.5 after 3 wins or losses in a row, ±0.5 more each further one, at most ±1.5 |
+| Hot/cold teaming | partners within 1.0 level, teams within 0.25, all four within 2 levels |
 | Rating: gap for a ~90% favourite | 2 levels |
-| Game-length effect on ratings | ±5% |
 | Standings: win / loss value | 0.93–1.0 / 0–0.1 |

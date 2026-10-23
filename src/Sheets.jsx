@@ -1,12 +1,12 @@
 // The sheets (iPad form sheets; full width from the bottom on phones): add, edit and replace players, standings and
-// history, sessions, earlier players, everyone, pair requests and tournament setup.
+// history, sessions, earlier players, everyone, teammate locks and tournament setup.
 import { useRef, useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Circle, CircleCheck, History, Plus, Trash2, Trophy, UserPlus, Users, CirclePause } from 'lucide-react';
 import { cn } from 'cn';
 import {
   getS, SKILL, PREFS, P, level, r1, avg, names, played, wins, score, isDupName, addPlayer, arrive, replacements, replace, courtById, clone,
-  deleteResult, past, returningPlayers, registry, queue, setPartner, pairPlayed, pairingActive, pairingMinimum, activePlayers,
+  deleteResult, past, returningPlayers, registry, queue, setLock, splitDue, rankingMinimum, places,
   tournamentEntrants, buildTournament, withMatching,
 } from './engine';
 import { ui, save, closeModal, openModal, openEdit, confirm, switchTo, newSession, deleteSession } from './store';
@@ -172,9 +172,11 @@ let risen = false; // the podium rises the first time it shows, not on every vis
 function Standings() {
   const S = getS();
   // Ranked by score; anyone yet to play goes last.
+  const minimum = rankingMinimum();
   const rows = S.players.map(p => ({ p, w: wins(p.id), n: played(p.id), sc: score(p.id) }))
-    .sort((a, b) => (b.n > 0) - (a.n > 0) || b.sc - a.sc || b.w - a.w);
-  const top = rows.filter(r => r.w > 0).slice(0, 3);
+    .sort((a, b) => (b.n >= minimum && b.n > 0) - (a.n >= minimum && a.n > 0) || b.sc - a.sc || b.w - a.w);
+  const ranks = places(rows.filter(r => r.n >= minimum && r.n > 0).map(r => r.sc));
+  const top = rows.map((r, i) => ({ ...r, rank: ranks[i] })).filter(r => r.w > 0 && r.rank <= 3);
   const rise = useRef(!risen).current;
   useEffect(() => { if (top.length) risen = true; });
   if (!rows.length) return <Section><div className={cn(row, 'text-muted-foreground')}>No players yet.</div></Section>;
@@ -182,11 +184,11 @@ function Standings() {
   const stat = (v, label) => <span><strong className="block text-[17px] font-semibold tabular-nums">{v ?? '–'}</strong><small className="text-[11px] text-muted-foreground">{label}</small></span>;
   return <>
     {top.length > 0 && <Podium top={top} rise={rise} />}
-    <Section head={top.length ? 'All players' : ''} foot="Ranked by Score: wins and losses decide it, and game length nudges it: a quicker, more one-sided win counts a little more, and a close loss still counts a little. Score starts everyone at 50 so one or two lucky games can't top the table.">
+    <Section head={top.length ? 'All players' : ''} foot="Score uses wins and losses with two extra wins and two extra losses. Game length does not affect it. Equal scores share a rank. Ranking requires at least 75% of the median games played.">
       {rows.map((r, i) => (
         <div key={r.p.id} className={cn(row, 'flex items-center gap-3')}>
-          <span className={cn('grid size-7 flex-none place-items-center rounded-full bg-secondary text-sm font-extrabold tabular-nums text-muted-foreground', r.n && i < 3 && medal[i])}
-            aria-label={r.n ? 'Rank ' + (i + 1) : 'Not ranked yet'}>{r.n ? i + 1 : '–'}</span>
+          <span className={cn('grid size-7 flex-none place-items-center rounded-full bg-secondary text-sm font-extrabold tabular-nums text-muted-foreground', ranks[i] && ranks[i] <= 3 && medal[ranks[i] - 1])}
+            aria-label={ranks[i] ? 'Rank ' + ranks[i] : 'Not ranked yet'}>{ranks[i] || '–'}</span>
           <b className="min-w-0 flex-1 truncate font-semibold">{r.p.name}</b>
           <span className="grid grid-cols-[repeat(4,minmax(40px,auto))] gap-x-2.5 text-center sm:gap-x-4">
             {stat(r.w, 'Won')}{stat(r.n, 'Played')}{stat(r.n ? Math.round(r.w * 100 / r.n) : null, 'Win %')}{stat(r.n ? r.sc.toFixed(1) : null, 'Score')}
@@ -199,7 +201,7 @@ function Standings() {
 
 /** The top three on a podium in an arena at night (floodlights, net and posts, court lines in perspective, a shuttle's flight). */
 function Podium({ top, rise }) {
-  const order = [1, 0, 2].filter(i => i < top.length);
+  const order = top.map((_, i) => i).sort((a, b) => [1, 0, 2][top[a].rank - 1] - [1, 0, 2][top[b].rank - 1]);
   const initials = n => n.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
   const floor = [-48, 36, 300, 564, 648].map(x => `M${x} 300L${(x + (300 - x) * 0.239).toFixed(1)} 168`).join('');
   const height = ['h-[130px] text-[52px]', 'h-24 text-[40px]', 'h-[74px] text-[40px]'];
@@ -224,25 +226,25 @@ function Podium({ top, rise }) {
         {[-31.5, 31.5].map(a => <g key={a} transform={`rotate(${a})`}><ellipse cx="0" cy="-62" rx="24" ry="31" fill="url(#as)" stroke="#fff" strokeWidth="3" /><path d="M0 -31V30" stroke="#fff" strokeWidth="2.5" /><rect x="-3.5" y="30" width="7" height="28" rx="3" fill="#fff" /></g>)}
       </svg>
       <div className="relative z-10 grid items-end gap-2.5" style={{ gridTemplateColumns: `repeat(${order.length},1fr)` }}>
-        {order.map(i => { const r = top[i];
+        {order.map(i => { const r = top[i], step = r.rank - 1;
           return (
-            <motion.div key={r.p.id} className={cn(`p${i + 1}`, 'grid min-w-0 justify-items-center gap-1.5 text-center text-white')} role="img"
-              aria-label={`Place ${i + 1}: ${r.p.name}, ${r.w} of ${r.n} won, score ${r.sc.toFixed(1)}`}
-              initial={rise && { opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5, delay: delay[i] }}>
+            <motion.div key={r.p.id} className={cn(`p${r.rank}`, 'grid min-w-0 justify-items-center gap-1.5 text-center text-white')} role="img"
+              aria-label={`Place ${r.rank}: ${r.p.name}, ${r.w} of ${r.n} won, score ${r.sc.toFixed(1)}`}
+              initial={rise && { opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5, delay: delay[step] }}>
               {/* A gold shuttlecock above the winner (cork down: feather skirt with ribs and a thread band, white cork). */}
-              <svg className={cn('h-[35px] w-7 drop-shadow-[0_0_6px_rgba(255,214,89,.8)]', i && 'invisible')} viewBox="0 0 24 30" aria-hidden="true">
+              <svg className={cn('h-[35px] w-7 drop-shadow-[0_0_6px_rgba(255,214,89,.8)]', step && 'invisible')} viewBox="0 0 24 30" aria-hidden="true">
                 <defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#ffd659" /><stop offset="1" stopColor="#cc8f0d" /></linearGradient></defs>
                 <path d="M8.6 21 .5 1.8Q12 4.8 23.5 1.8L15.4 21Z" fill="url(#cg)" />
                 <path d="M9.4 20.4 4.8 3M10.7 20.4 8.4 3.2M12 20.4V3.4M13.3 20.4 15.6 3.2M14.6 20.4 19.2 3M4.8 11.4Q12 13.2 19.2 11.4" stroke="#fff" strokeOpacity=".7" strokeWidth=".8" fill="none" />
                 <ellipse cx="12" cy="24.5" rx="5.3" ry="5.1" fill="#fff" stroke="#cc8f0d" />
               </svg>
               <span aria-hidden="true" className={cn('grid place-items-center rounded-full border-[3px] border-white/90 bg-[linear-gradient(135deg,var(--m1),var(--m2))] font-round font-extrabold [text-shadow:0_1px_1px_rgba(0,0,0,.25)]',
-                i ? 'size-[58px] text-[21px] shadow-[0_0_12px_var(--m1)]' : 'size-[70px] text-[26px] shadow-[0_0_22px_var(--m1)]')}>{initials(r.p.name)}</span>
-              <b aria-hidden="true" className="max-w-full truncate text-[17px] font-semibold">{r.p.name}</b>
+                step ? 'size-[58px] text-[21px] shadow-[0_0_12px_var(--m1)]' : 'size-[70px] text-[26px] shadow-[0_0_22px_var(--m1)]')}>{initials(r.p.name)}</span>
+              <b aria-hidden="true" className="max-w-full truncate text-[17px] font-semibold" title={r.p.name}>{r.p.name}</b>
               <span aria-hidden="true" className="flex gap-1.5 text-xs font-semibold tabular-nums opacity-85"><span>{r.w}–{r.n - r.w}</span><span className="rounded-full bg-white/20 px-[7px]">{r.sc.toFixed(1)}</span></span>
-              <motion.div aria-hidden="true" style={{ originY: 1 }} initial={rise && { scaleY: 0.02 }} animate={{ scaleY: 1 }} transition={{ duration: 0.6, delay: delay[i], ease: [0.3, 1.4, 0.5, 1] }}
-                className={cn('relative w-full rounded-t-xl bg-[linear-gradient(var(--m1),var(--m2))] pt-3.5 font-round leading-none font-black [text-shadow:0_2px_2px_rgba(0,0,0,.25)]', height[i],
-                  'before:absolute before:top-1.5 before:right-3.5 before:left-3.5 before:h-[5px] before:rounded-full before:bg-white/45')}>{i + 1}</motion.div>
+              <motion.div aria-hidden="true" style={{ originY: 1 }} initial={rise && { scaleY: 0.02 }} animate={{ scaleY: 1 }} transition={{ duration: 0.6, delay: delay[step], ease: [0.3, 1.4, 0.5, 1] }}
+                className={cn('relative w-full rounded-t-xl bg-[linear-gradient(var(--m1),var(--m2))] pt-3.5 font-round leading-none font-black [text-shadow:0_2px_2px_rgba(0,0,0,.25)]', height[step],
+                  'before:absolute before:top-1.5 before:right-3.5 before:left-3.5 before:h-[5px] before:rounded-full before:bg-white/45')}>{r.rank}</motion.div>
             </motion.div>
           ); })}
       </div>
@@ -302,7 +304,7 @@ function Sessions() {
 function Returning() {
   const [search, setSearch] = useState(''), [picked, setPicked] = useState([]);
   const all = returningPlayers(), shown = all.filter(p => match(search, p.name));
-  const add = () => { for (const n of picked) { const p = all.find(x => x.name === n); if (p) addPlayer(p.name, p.skill); } save(); closeModal(); };
+  const add = () => { for (const n of picked) { const p = all.find(x => x.name === n); if (p) addPlayer(p.name, p.skill, p.rated ?? null); } save(); closeModal(); };
   return (
     <Sheet title="Earlier Players" right={{ label: picked.length ? 'Add ' + picked.length : 'Add', run: add, disabled: !picked.length }}
       bottom={all.length > 0 && <NavButton label={picked.length === all.length ? 'Clear All' : 'Select All'} run={() => setPicked(picked.length === all.length ? [] : all.map(p => p.name))} />}>
@@ -380,7 +382,7 @@ function SessionPlayers() {
 /** Discreet: only existing requests are listed; players are picked in the add step. */
 function Pairing() {
   const S = getS(), [adding, setAdding] = useState(false), [a, setA] = useState(''), [b, setB] = useState('');
-  const mutual = p => p.partner && P(p.partner)?.partner === p.id;
+  const mutual = p => p.lock && P(p.lock)?.lock === p.id;
   if (adding) {
     const free = S.players.filter(p => p.pref !== 'singles' && !mutual(p));
     const pickOne = (label, val, set, other) => (
@@ -391,25 +393,23 @@ function Pairing() {
       </label>
     );
     return (
-      <Sheet title="Add Pair Request" left={{ label: 'Back', run: () => setAdding(false) }} right={{ label: 'Add', disabled: !(a && b), run: () => { setPartner(a, b); save(); setAdding(false); } }}>
-        <Section foot={free.length < 2 && 'Everyone who plays doubles already has a pair request.'}>{pickOne('Player', a, setA, b)}{pickOne('Partner', b, setB, a)}</Section>
+      <Sheet title="Lock Teammates" left={{ label: 'Back', run: () => setAdding(false) }} right={{ label: 'Add', disabled: !(a && b), run: () => { setLock(a, b); save(); setAdding(false); } }}>
+        <Section foot={free.length < 2 && 'Everyone who plays doubles already has a teammate lock.'}>{pickOne('Player', a, setA, b)}{pickOne('Partner', b, setB, a)}</Section>
       </Sheet>
     );
   }
-  const pairs = S.players.filter(p => mutual(p) && p.id < p.partner).map(p => [p, P(p.partner)]);
-  const on = pairingActive(), n = activePlayers();
+  const pairs = S.players.filter(p => mutual(p) && p.id < p.lock).map(p => [p, P(p.lock)]);
   return (
-    <Sheet title="Increase Pairing %" left={null} right={{ label: 'Done', run: closeModal }}>
-      {!on && <Section><div className={cn(row, 'flex gap-2 text-muted-foreground')}><CirclePause className="mt-0.5 size-5 flex-none" />On hold until there are {pairingMinimum()} players for {plural(S.courts.length, 'court')}. There {n === 1 ? 'is' : 'are'} {n} now, not counting anyone sitting out.</div></Section>}
-      <Section foot="Each pair plays one game together this session, with even teams, one pair at a time. After that they're treated like everyone else. Needs at least twice the players the courts take, minus two.">
+    <Sheet title="Locked Teammates" left={null} right={{ label: 'Done', run: closeModal }}>
+      <Section foot="Locked teammates play against an equal or higher-rated team (within 0.05), with normal rest and game-count protections. If no suitable game is available after 20 minutes, or they fall two games behind, they play separately to catch up. After three wins together, each plays one game with a different teammate; they do not have to face each other.">
         {pairs.map(([x, y]) => (
           <div key={x.id} className={cn(row, 'flex items-center justify-between gap-3 py-1.5')}>
-            <Who name={`${x.name} & ${y.name}`} sub={pairPlayed(x.id, y.id) ? 'Played together' : 'Waiting'} />
-            <button className="grid size-11 place-items-center text-destructive" aria-label={`Remove pair request for ${x.name} and ${y.name}`} title="Remove" onClick={() => { setPartner(x.id, null); save(); }}><Trash2 className="size-[19px]" /></button>
+            <Who name={`${x.name} & ${y.name}`} sub={splitDue(x.id, y.id) ? 'Cooldown · different teammates' : 'Locked together'} />
+            <button className="grid size-11 place-items-center text-destructive" aria-label={`Remove teammate lock for ${x.name} and ${y.name}`} title="Remove" onClick={() => { setLock(x.id, null); save(); }}><Trash2 className="size-[19px]" /></button>
           </div>
         ))}
-        {!pairs.length && <div className={cn(row, 'text-muted-foreground')}>No pair requests.</div>}
-        <button className={cn(btnRow, 'text-ink')} disabled={!on} onClick={() => { setA(''); setB(''); setAdding(true); }}><Plus className="size-5" />Add Pair Request</button>
+        {!pairs.length && <div className={cn(row, 'text-muted-foreground')}>No teammate locks.</div>}
+        <button className={cn(btnRow, 'text-ink')} onClick={() => { setA(''); setB(''); setAdding(true); }}><Plus className="size-5" />Lock Teammates</button>
       </Section>
     </Sheet>
   );

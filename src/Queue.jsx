@@ -51,7 +51,7 @@ function QueueSection() {
   return <>
     <Section head={`Queue · ${q.length} off court · ${onCourt().size} playing`}
       foot={(balancedOnly() ? `Balanced teams: fewer than ${8 * S.courts.length} players for ${plural(S.courts.length, 'doubles court')}, so games mix levels with even teams instead of similar-skill groups. ` : '')
-        + 'Tap a player to edit. Press and hold (or right-click) to sit out, move to front, or remove. Fewest games played goes first (on a tie, whoever is hardest to match), then longest rested; anyone waiting 20+ minutes plays next, so nobody waits over 30. Doubles: similar-skill groups, avoiding recent partners and opponents.'}>
+        + 'Tap a player to edit. Press and hold (or right-click) to sit out, move to front, or remove. Fewest games played goes first (on a tie, whoever is hardest to match), then longest rested; wait priority starts at 20 minutes, with the oldest wait taking priority at 30. The 30-minute target depends on available courts and suitable players. Doubles: similar-skill groups, avoiding recent partners and opponents.'}>
       <AnimatePresence initial={false}>
         {q.map(p => <QueueRow key={p.id} p={p} pos={p.paused ? null : ++n} />)}
       </AnimatePresence>

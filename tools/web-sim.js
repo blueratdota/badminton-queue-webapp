@@ -1,4 +1,4 @@
-// node tools/web-sim.js src/engine.js <sessions.json> [--courts 3] [--minutes 180] [--runs 30] [--pairs "A,B;C,D"]
+// node tools/web-sim.js <page.html> <sessions.json> [--courts 3] [--minutes 180] [--runs 30] [--pairs "A,B;C,D"] [--parity [--locks "A,B;C,D"]] [--length 10-14]
 // Replays whole nights through the web version's own matching (fill, finish, nextPairing) on a virtual clock, with and
 // without the pair requests, and prints a report. The sessions file is the iPad's sessions.json (its current session is used).
 const fs = require('fs');
@@ -6,18 +6,22 @@ const loadPage = require('./load-page');
 const [html, input] = process.argv.slice(2);
 const opt = (k, d) => { const i = process.argv.indexOf('--' + k); return i > 0 ? process.argv[i + 1] : d; };
 const courts = +opt('courts', 3), minutes = +opt('minutes', 180), runs = +opt('runs', 30);
+const [lenMin, lenMax] = opt('length', '10-14').split('-').map(Number); // game length range in minutes
 const pairs = (opt('pairs', '') || '').split(';').filter(Boolean).map(p => p.split(',').map(s => s.trim()));
+const locks = (opt('locks', '') || '').split(';').filter(Boolean).map(p => p.split(',').map(s => s.trim()));
 const page = loadPage(html);
+if (pairs.length && !page.setPartner) throw new Error('This web version removed pair requests. Use --locks with --parity for locked teammates.');
 if (!(page.get('SPREAD') > 0)) throw new Error('could not read the rating spread from the page');
 if (process.argv.includes('--parity')) { // one night with nothing random; same rules as the iPad's -parity
   const t0 = 1e12; let T = t0; Date.now = () => T;
   const src0 = JSON.parse(fs.readFileSync(input, 'utf8'));
   const S = { id: 'p', date: t0, results: [], tournament: null,
-    players: (src0.current || src0).players.map((p, n) => ({ id: 'p' + n, name: p.name, skill: p.skill, pref: 'any', paused: false, readyAt: t0 + n })),
+    players: (src0.current || src0).players.map((p, n) => ({ id: 'p' + n, name: p.name, skill: p.skill, rated: p.rated, pref: p.pref || 'any', paused: false, readyAt: t0 + n })),
     courts: Array.from({ length: courts }, (_, i) => page.court('Court ' + (i + 1), 'doubles')) };
   page.set('S', S);
   const byName = Object.fromEntries(S.players.map(p => [p.name, p.id])), truth = Object.fromEntries(S.players.map(p => [p.id, p.skill]));
   for (const [x, y] of pairs) page.setPartner(byName[x], byName[y]);
+  for (const [x, y] of locks) page.setLock(byName[x], byName[y]); // --locks "A,B;C,D"
   const lines = [], ends = {}, winners = {}; let k = 0;
   const drawsFile = opt('draws', null), draws = drawsFile ? JSON.parse(fs.readFileSync(drawsFile, 'utf8')) : null; // [[minutes, u], ...]
   while (true) {
@@ -49,7 +53,7 @@ const mean = x => x.length ? x.reduce((a, b) => a + b, 0) / x.length : 0;
 const f1 = x => x.toFixed(1), f2 = x => x.toFixed(2);
 const clock = m => `${Math.floor(m / 60)}:${String(Math.floor(m % 60)).padStart(2, '0')}`;
 
-/** One night: everyone there from the start, courts refill the moment they free up, games last 10–14 minutes,
+/** One night: everyone there from the start, courts refill the moment they free up, games last --length minutes (10–14),
     winners drawn from the starting ratings (each player's "true" strength). */
 function night(seed, withPairs) {
   const rng = page.mulberry32(seed * 7919);
@@ -60,6 +64,7 @@ function night(seed, withPairs) {
   page.set('S', S);
   const truth = Object.fromEntries(S.players.map(p => [p.id, p.skill])), byName = Object.fromEntries(S.players.map(p => [p.name, p.id]));
   if (withPairs) for (const [x, y] of pairs) page.setPartner(byName[x], byName[y]);
+  for (const [x, y] of locks) { if (!byName[x] || !byName[y]) throw new Error('Unknown locked teammate: ' + [x,y].join(', ')); page.setLock(byName[x], byName[y]); }
   const games = [], ends = {};
   while (true) {
     if (T < t0 + minutes * 60000) for (const c of S.courts) {
@@ -67,8 +72,8 @@ function night(seed, withPairs) {
       const p = page.nextPairing(c); if (!p) continue;
       const ids = [...p.a, ...p.b].map(x => x.id);
       if (new Set(ids).size !== 4 || ids.some(id => page.onCourt().has(id))) throw new Error('a player was booked twice');
-      const planned = page.isPairGame(p.a.map(x => x.id), p.b.map(x => x.id));
-      const len = (10 + rng() * 4) * 60000;
+      const planned = (page.isPairGame?.(p.a.map(x => x.id), p.b.map(x => x.id)) || false);
+      const len = (lenMin + rng() * (lenMax - lenMin)) * 60000;
       games.push({ minute: (T - t0) / 60000, length: len / 60000, court: c.name, a: p.a.map(x => x.name), b: p.b.map(x => x.name),
         sa: p.a.map(x => truth[x.id]), sb: p.b.map(x => truth[x.id]), planned, plannedGap: planned ? Math.abs(page.sum(p.a) - page.sum(p.b)) / 2 : null, note: p.note });
       page.fill(c.id);
@@ -98,7 +103,7 @@ function waits(games) {
 
 const paired = new Set(pairs.flat()), rest = roster.map(p => p.name).filter(n => !paired.has(n));
 const skill = Object.fromEntries(roster.map(p => [p.name, p.skill]));
-let out = `# ${pairs.length ? pairs.length + ' pair requests against none' : 'Simulated nights'} (web version's matching)\n\n${roster.length} players · ${courts} doubles courts · ${minutes / 60} hours · games 10–14 min · ${runs} nights each · same random draws\n\n`;
+let out = `# ${pairs.length ? pairs.length + ' pair requests against none' : 'Simulated nights'} (web version's matching)\n\n${roster.length} players · ${courts} doubles courts · ${minutes / 60} hours · games ${lenMin}–${lenMax} min · ${runs} nights each · same random draws\n\n`;
 if (pairs.length) out += 'Pairs: ' + pairs.map(([x, y]) => `${x} ${f1(skill[x])} & ${y} ${f1(skill[y])}`).join(' · ') + '\n\n';
 const configs = pairs.length ? [false, true] : [false];
 const seedBase = +opt('seeds', 0); // --seeds N: start from a different set of random nights
