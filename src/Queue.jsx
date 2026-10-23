@@ -5,7 +5,7 @@ import { Ellipsis, CirclePause, Pause, Play, Pencil, ArrowUpToLine, Trash2, Trop
 import { cn } from 'cn';
 import { getS, queue, played, onCourt, balancedOnly, BALANCED_BELOW, waitStart, startedAt, isLocked, arrive, P, champion, tEntrant, entrantName, sidesIfReady, rrTable } from './engine';
 import { act, openModal, openEdit as edit, confirm } from './store';
-import { cap, plural, row, Dots, Section, Seg } from './bits';
+import { cap, plural, row, Dots, Section } from './bits';
 import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
@@ -14,14 +14,6 @@ export function SidePanel({ up }) {
   const S = getS(), t = S.tournament;
   return (
     <div className="flex min-w-0 flex-col gap-[22px]">
-      <div className="rounded-2xl bg-card p-2.5">
-        <Seg label="Mode" value={t ? 'tournament' : 'queue'} options={[{ value: 'queue', label: 'Queue' }, { value: 'tournament', label: 'Tournament' }]}
-          onChange={v => {
-            if (v === 'tournament' && !t) openModal({ type: 'tsetup', format: 'doubles', advance: 4 });
-            if (v === 'queue' && t) confirm({ title: 'End the tournament and go back to the queue?', message: 'Games already played stay in Match History and Standings.',
-              actions: [{ label: 'End Tournament', danger: true, run: () => act(() => { S.tournament = null; }) }] });
-          }} />
-      </div>
       {t ? up.length > 0 && <Section head="Up Next">{up.map((p, i) => <UpRow key={i} label={t.matches[p.match].label} f={p.format} p={p} />)}</Section>
         : S.courts.some(c => c.match) && <div className="order-2"><Section head="After this game · projected">{S.courts.filter(c => c.match).map(c =>
             <UpRow key={c.id} label={`${c.name} · ${c.format}`} f={c.format} p={up.find(p => p.court === c.id)} />)}</Section></div>}

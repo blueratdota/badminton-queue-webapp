@@ -13,3 +13,5 @@ All data stays in this browser's localStorage (`shuttle-queue-v2`); export befor
 Netlify builds with `npm run build` and publishes `dist/`. Frontend components and the engine are separate so design work can continue independently.
 
 The responsive dashboard uses phone tabs below 701px and courts beside the queue on iPad mini and larger screens. Active courts are deep red; ready courts stay green. Each active court has an independent shuttle rally, disabled for reduced-motion preferences. Streak buffs use blue dots, debuffs use red dots, and overflowing win streaks show 🔥 in a reserved slot.
+
+Switch between Queue and Tournament under the gear **Settings → Mode**. Starting a tournament opens setup; returning to Queue asks for confirmation and keeps finished games in history and standings.

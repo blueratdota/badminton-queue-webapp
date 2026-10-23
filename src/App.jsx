@@ -74,8 +74,18 @@ function Toolbar() {
   return (
     <div role="toolbar" aria-label="Session tools" className="flex gap-0.5 rounded-full bg-glass px-1.5 py-1 shadow-[0_1px_4px_rgba(0,0,0,.14)] ring-1 ring-black/5 backdrop-blur-xl max-[700px]:flex-1 max-[700px]:justify-between dark:ring-white/10">
       <DropdownMenu>
-        <DropdownMenuTrigger asChild><Button variant="ghost" className={tb} aria-label="Options" title="Options"><Settings /></Button></DropdownMenuTrigger>
+        <DropdownMenuTrigger asChild><Button variant="ghost" className={tb} aria-label="Settings" title="Settings"><Settings /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-[230px]">
+          <DropdownMenuLabel>Mode</DropdownMenuLabel>
+          <DropdownMenuRadioGroup value={S.tournament ? 'tournament' : 'queue'} onValueChange={v => {
+            if (v === 'tournament' && !S.tournament) openModal({ type: 'tsetup', format: 'doubles', advance: 4 });
+            if (v === 'queue' && S.tournament) confirm({ title: 'End the tournament and go back to the queue?', message: 'Games already played stay in Match History and Standings.',
+              actions: [{ label: 'End Tournament', danger: true, run: () => act(() => { S.tournament = null; }) }] });
+          }}>
+            <DropdownMenuRadioItem value="queue">Queue</DropdownMenuRadioItem>
+            <DropdownMenuRadioItem value="tournament">Tournament</DropdownMenuRadioItem>
+          </DropdownMenuRadioGroup>
+          <DropdownMenuSeparator />
           <DropdownMenuLabel>Appearance</DropdownMenuLabel>
           <DropdownMenuRadioGroup value={theme()} onValueChange={setTheme}>
             {['system', 'light', 'dark'].map(v => <DropdownMenuRadioItem key={v} value={v}>{v[0].toUpperCase() + v.slice(1)}</DropdownMenuRadioItem>)}
