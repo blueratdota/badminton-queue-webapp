@@ -4,9 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node tools/web-check.js src/engine.js && vite build",
+    "build": "npm run check && vite build",
     "preview": "vite preview",
-    "check": "node tools/web-check.js src/engine.js",
+    "check": "node tools/web-check.js src/engine.js && node tools/frontend-check.js",
     "sim": "node tools/web-sim.js src/engine.js",
     "scan": "node tools/web-scan.js src/engine.js"
   },

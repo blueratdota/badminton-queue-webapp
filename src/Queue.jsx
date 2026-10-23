@@ -1,14 +1,14 @@
 // The side panel: Queue / Tournament, Up Next for each court, then the queue (or the tournament's tables and brackets).
 import { useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CirclePause, Pause, Play, Pencil, ArrowUpToLine, Trash2, Trophy, UserX } from 'lucide-react';
+import { Ellipsis, CirclePause, Pause, Play, Pencil, ArrowUpToLine, Trash2, Trophy, UserX } from 'lucide-react';
 import { cn } from 'cn';
-import { getS, PREFS, queue, played, wins, onCourt, balancedOnly, arrive, P, champion, tEntrant, entrantName, sidesIfReady, rrTable } from './engine';
+import { getS, queue, played, onCourt, balancedOnly, BALANCED_BELOW, waitStart, startedAt, isLocked, arrive, P, champion, tEntrant, entrantName, sidesIfReady, rrTable } from './engine';
 import { act, openModal, openEdit as edit, confirm } from './store';
-import { cap, plural, row, Dots, Rating, Section, Seg } from './bits';
+import { cap, plural, row, Dots, Section, Seg } from './bits';
 import { Button } from '@/components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 
 export function SidePanel({ up }) {
   const S = getS(), t = S.tournament;
@@ -23,8 +23,8 @@ export function SidePanel({ up }) {
           }} />
       </div>
       {t ? up.length > 0 && <Section head="Up Next">{up.map((p, i) => <UpRow key={i} label={t.matches[p.match].label} f={p.format} p={p} />)}</Section>
-        : S.courts.length > 0 && <Section head="Up Next">{S.courts.map(c =>
-            <UpRow key={c.id} label={`${c.name} · ${c.format}${c.match ? ' · after this game' : ''}`} f={c.format} p={up.find(p => p.court === c.id)} />)}</Section>}
+        : S.courts.some(c => c.match) && <div className="order-2"><Section head="After this game · projected">{S.courts.filter(c => c.match).map(c =>
+            <UpRow key={c.id} label={`${c.name} · ${c.format}`} f={c.format} p={up.find(p => p.court === c.id)} />)}</Section></div>}
       {t ? <TournamentSections t={t} /> : <QueueSection />}
     </div>
   );
@@ -38,7 +38,7 @@ function UpRow({ label, f, p }) {
       <span className={fmt(f)}>{label}</span>
       {p ? <>
         <b className="text-[15px] font-semibold [overflow-wrap:anywhere]">{p.a.map(x => x.name).join(' & ')}</b>
-        <span className="text-xs font-extrabold text-destructive">VS</span>
+        <span className="text-xs font-medium text-muted-foreground">VS</span>
         <b className="text-[15px] font-semibold [overflow-wrap:anywhere]">{p.b.map(x => x.name).join(' & ')}</b>
       </> : <span className="text-[13px] text-muted-foreground">Waiting for available players</span>}
     </div>
@@ -50,8 +50,8 @@ function QueueSection() {
   let n = 0;
   return <>
     <Section head={`Queue · ${q.length} off court · ${onCourt().size} playing`}
-      foot={(balancedOnly() ? `Balanced teams: fewer than ${8 * S.courts.length} players for ${plural(S.courts.length, 'doubles court')}, so games mix levels with even teams instead of similar-skill groups. ` : '')
-        + 'Tap a player to edit. Press and hold (or right-click) to sit out, move to front, or remove. Fewest games played goes first (on a tie, whoever is hardest to match), then longest rested; wait priority starts at 20 minutes, with the oldest wait taking priority at 30. The 30-minute target depends on available courts and suitable players. Doubles: similar-skill groups, avoiding recent partners and opponents.'}>
+      foot={(balancedOnly() ? `Balanced teams: fewer than ${Math.ceil(BALANCED_BELOW * S.courts.length)} players for ${plural(S.courts.length, 'doubles court')}, so games mix levels with even teams instead of similar-skill groups. ` : '')
+        + 'Fewest games first, then longest rested. Tap a player to edit; use ⋯ for queue actions.'}>
       <AnimatePresence initial={false}>
         {q.map(p => <QueueRow key={p.id} p={p} pos={p.paused ? null : ++n} />)}
       </AnimatePresence>
@@ -75,6 +75,15 @@ function QueueSection() {
 function QueueRow({ p, pos }) {
   const S = getS();
   const start = useRef(null), menuOpened = useRef(false);
+  const actions = (Item, Separator) => <>
+        <Item onSelect={() => edit(p)}><Pencil />Edit Name or Rating</Item>
+        <Item onSelect={() => act(() => { P(p.id).paused = !p.paused; })}>{p.paused ? <Play /> : <Pause />}{p.paused ? 'Back In' : 'Sit Out'}</Item>
+        <Item onSelect={() => act(() => { const x = P(p.id); x.readyAt = Math.min(...S.players.map(y => y.readyAt)) - 1000; x.first = true; })}><ArrowUpToLine />Move to Front</Item>
+        <Item onSelect={() => act(() => { P(p.id).away = true; })}><UserX />Not Here</Item>
+        <Separator />
+        <Item variant="destructive" onSelect={() => confirm({ title: `Remove ${p.name}?`, message: "They leave this session's queue. Games they played stay in the history.",
+          actions: [{ label: `Remove ${p.name}`, danger: true, run: () => act(() => { S.players = S.players.filter(x => x.id !== p.id); }) }] })}><Trash2 />Remove from Session</Item>
+      </>;
   return (
     <ContextMenu onOpenChange={o => { if (o) menuOpened.current = true; }}>
       <ContextMenuTrigger asChild
@@ -88,36 +97,17 @@ function QueueRow({ p, pos }) {
             aria-label={`${p.name}, ${pos ? 'number ' + pos : 'sitting out'}. Edit name or rating. Press and hold for more.`}>
             <span className="flex min-w-7 justify-end font-semibold tabular-nums text-muted-foreground">{pos ?? <CirclePause className="size-5" />}</span>
             <span className="grid min-w-0">
-              <b className="truncate font-semibold">{p.name}</b>
-              <small className="truncate text-xs text-muted-foreground">{played(p.id)} played · {wins(p.id)} won</small>
+              <b className="font-semibold [overflow-wrap:anywhere]">{p.name}</b>
+              <small className="text-[13px] text-muted-foreground">{played(p.id)} played{isLocked(p) ? ` · with ${P(p.lock).name}` : ''}{startedAt() != null && S.ended == null ? ` · ${Math.max(0, Math.floor((Date.now() - waitStart(p)) / 60000))} min` : ''}</small>
             </span>
           </button>
-          <span className="flex flex-none flex-col items-center gap-1">
-            <Rating p={p} onClick={() => edit(p)} />
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button className={cn('rounded-full bg-secondary px-2 py-1 text-[11px] font-bold uppercase tracking-wide', p.pref === 'singles' ? 'text-singles' : p.pref === 'doubles' ? 'text-ink' : 'text-muted-foreground')}
-                  aria-label={`${p.name} plays ${p.pref}. Change`}>{p.pref}</button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuLabel>Plays</DropdownMenuLabel>
-                <DropdownMenuRadioGroup value={p.pref} onValueChange={v => act(() => { P(p.id).pref = v; })}>
-                  {PREFS.map(v => <DropdownMenuRadioItem key={v} value={v}>{cap(v)}</DropdownMenuRadioItem>)}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </span>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-pill" aria-label={`Actions for ${p.name}`}><Ellipsis /></Button></DropdownMenuTrigger>
+            <DropdownMenuContent>{actions(DropdownMenuItem, DropdownMenuSeparator)}</DropdownMenuContent>
+          </DropdownMenu>
         </motion.div>
       </ContextMenuTrigger>
-      <ContextMenuContent className="min-w-[230px]">
-        <ContextMenuItem onSelect={() => edit(p)}><Pencil />Edit Name or Rating</ContextMenuItem>
-        <ContextMenuItem onSelect={() => act(() => { P(p.id).paused = !p.paused; })}>{p.paused ? <Play /> : <Pause />}{p.paused ? 'Back In' : 'Sit Out'}</ContextMenuItem>
-        <ContextMenuItem onSelect={() => act(() => { const x = P(p.id); x.readyAt = Math.min(...S.players.map(y => y.readyAt)) - 1000; x.first = true; })}><ArrowUpToLine />Move to Front</ContextMenuItem>
-        <ContextMenuItem onSelect={() => act(() => { P(p.id).away = true; })}><UserX />Not Here</ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem variant="destructive" onSelect={() => confirm({ title: `Remove ${p.name}?`, message: "They leave this session's queue. Games they played stay in the history.",
-          actions: [{ label: `Remove ${p.name}`, danger: true, run: () => act(() => { S.players = S.players.filter(x => x.id !== p.id); }) }] })}><Trash2 />Remove from Session</ContextMenuItem>
-      </ContextMenuContent>
+      <ContextMenuContent className="min-w-[230px]">{actions(ContextMenuItem, ContextMenuSeparator)}</ContextMenuContent>
     </ContextMenu>
   );
 }

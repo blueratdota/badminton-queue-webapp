@@ -140,3 +140,23 @@
 /* Sheets: grouped background, and in dark mode the raised sheet colours (cards lighter than the sheet). */
 .sheet { background: var(--background); }
 .dark .sheet { background: #1c1c1e; --card: #2c2c2e; --popover: #3a3a3c; }
+
+/* Final dashboard treatment: active courts, streaks and stable rating spacing. */
+:root { --court-live: #803338; --streak-buff: #009eff; --streak-debuff: #ff1f4d; }
+.court.playing { --court: var(--court-live); background: var(--court-live); }
+.court-status { font-size: 12px; font-weight: 600; border-radius: 7px; padding: 5px 8px; background: var(--secondary); color: var(--muted-foreground); }
+.court-status.ready { background: var(--tint); color: var(--ink); }
+.court-status.playing { background: color-mix(in srgb,var(--destructive) 12%,var(--card)); color: var(--destructive); }
+.rally, .rally-shadow { position: absolute; left: 0; top: 0; pointer-events: none; }
+.rally { width: 14px; height: 18px; }
+.rally-shadow { width: 12px; height: 4px; border-radius: 50%; background: #000; opacity: .25; }
+@media (prefers-reduced-motion: reduce) { .rally, .rally-shadow { display: none; } }
+.rating-dots { position: relative; display: inline-flex; align-items: center; gap: 3px; height: 14px; padding-inline: 17px; vertical-align: middle; }
+.rating-dots i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .2; }
+.rating-dots i.on, .rating-dots i.win, .rating-dots i.loss { opacity: 1; }
+.rating-dots.win i.on, .rating-dots i.win.p2 { background: var(--streak-buff); }
+.rating-dots.loss i.on, .rating-dots i.loss.p2 { background: var(--streak-debuff); }
+.rating-dots i.win.p1 { background: linear-gradient(90deg,var(--streak-buff) 50%,color-mix(in srgb,currentColor 20%,transparent) 50%); }
+.rating-dots .fire { position: absolute; right: 0; top: 0; display: grid; place-items: center; width: 14px; height: 14px; font-size: 12px; line-height: 14px; }
+.rating-dots.loss i.ring { box-shadow: 0 0 0 1.5px var(--background),0 0 0 2.7px var(--streak-debuff); }
+.court .rating-dots.loss i.ring { box-shadow: 0 0 0 1.2px var(--court),0 0 0 2.4px var(--streak-debuff); }

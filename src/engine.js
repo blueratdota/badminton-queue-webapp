@@ -978,7 +978,7 @@ export function selfCheck() {
     console.assert(Math.abs(Date.now() - waitStart(S.players[0]) - 600000) < 1000, "from their last game; sitting out doesn't restart it");
     S = keepS;
   }
-  console.assert(sd(5, 0.5).endsWith('ring') && sd(1, -1.5) === '1,0,0,0,0 ring' && sd(3, 0) === '0,0,0,0,0', "a ring when there's no room");
+  console.assert(streakDots(5, 0.5).fire && !streakDots(5, 0.5).ring && sd(1, -1.5) === '1,0,0,0,0 ring' && sd(3, 0) === '0,0,0,0,0', 'overflow wins show fire; overflow losses retain rings');
   S.results.pop();
   // A cancelled game isn't a game: no count, no rating, nobody just off, and the four are back where they were in line.
   S = { players: [0, 1, 2, 3, 4, 5, 6, 7].map(i => ({ ...pl(3, i), readyAt: Date.now() - 60000 + i })), courts: [court('C', 'doubles')], results: [], tournament: null };
@@ -1248,5 +1248,5 @@ export const getS = () => S, getSessions = () => sessions, getCurrentId = () => 
 export function streakDots(filled, boost) {
   const clamp = x => Math.min(1, Math.max(0, x));
   const parts = [1, 2, 3, 4, 5].map(i => boost > 0 ? (i > filled ? clamp(filled + boost - (i - 1)) : 0) : boost < 0 ? (i <= filled ? clamp(i - (filled + boost)) : 0) : 0);
-  return { parts, ring: boost > 0 ? filled + boost > 5 : -boost > filled };
+  return { parts, ring: boost < 0 && -boost > filled, fire: boost > 0 && filled + boost > 5 };
 }

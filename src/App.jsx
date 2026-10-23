@@ -24,32 +24,32 @@ export default function App() {
 
   const canFill = S.courts.some(c => next.byCourt.get(c.id));
   const fillAll = () => act(() => S.courts.forEach(c => fill(c.id)));
-  const fillButton = cls => <Button size="pill" className={cn('px-5 text-[17px]', cls)} disabled={!canFill} onClick={fillAll}>Fill Open Courts</Button>;
+  const fillButton = cls => <Button size="pill" className={cn('px-5 text-[17px]', cls)} disabled={!canFill} onClick={fillAll}>Start Ready Courts</Button>;
 
   return (
-    <div className="flex min-h-dvh flex-col pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] lg:h-dvh">
+    <div className="flex min-h-dvh flex-col pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] min-[701px]:h-dvh">
       <header className="flex flex-wrap items-center gap-x-3.5 gap-y-2.5 px-4 py-2.5">
-        <h1 className="min-w-0 flex-[1_1_220px] truncate text-[17px] font-semibold max-sm:basis-full">
+        <h1 className="min-w-0 flex-[1_1_220px] truncate text-[17px] font-semibold max-[700px]:basis-full">
           Shuttle Queue · {new Date(S.date).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}
         </h1>
-        <div className="flex flex-wrap items-center gap-2.5 max-sm:w-full">
+        <div className="flex flex-wrap items-center gap-2.5 max-[700px]:w-full">
           <Toolbar />
-          {fillButton('max-sm:hidden')}
+          {fillButton('max-[700px]:hidden')}
         </div>
       </header>
 
-      <main className="min-h-0 flex-1 lg:grid lg:grid-cols-[minmax(0,1fr)_340px]">
-        <section aria-label="Courts" className={cn('grid content-start gap-3 px-4 pt-1 pb-6 sm:grid-cols-2 lg:grid-cols-[repeat(auto-fill,minmax(340px,1fr))] lg:overflow-auto', tab !== 'courts' && 'max-sm:hidden')}>
+      <main className="min-h-0 flex-1 min-[701px]:grid min-[701px]:grid-cols-[minmax(0,1fr)_280px] xl:grid-cols-[minmax(0,1fr)_340px]">
+        <section aria-label="Courts" className={cn('grid content-start gap-3 px-4 pt-1 pb-6 min-[701px]:grid-cols-[repeat(auto-fill,minmax(min(300px,100%),1fr))] min-[701px]:overflow-auto', tab !== 'courts' && 'max-[700px]:hidden')}>
           {S.courts.map(c => <CourtCard key={c.id} c={c} next={next.byCourt.get(c.id)} />)}
           {!S.courts.length && <p className="flex items-center gap-1.5 px-1 py-6 text-muted-foreground">No courts yet. Add one with <SquarePlus className="size-5" /> in the toolbar.</p>}
         </section>
-        <aside aria-label="Queue" className={cn('min-w-0 px-4 pt-5 pb-6 lg:overflow-auto lg:border-l lg:pt-1', tab !== 'queue' && 'max-sm:hidden')}>
+        <aside aria-label="Queue" className={cn('min-w-0 px-4 pt-5 pb-6 min-[701px]:overflow-auto min-[701px]:border-l min-[701px]:pt-4 min-[701px]:bg-card', tab !== 'queue' && 'max-[700px]:hidden')}>
           <SidePanel up={next.up} />
         </aside>
       </main>
 
-      {/* Phones: switch between courts and queue; Fill Open Courts stays in reach. */}
-      <nav className="sticky bottom-0 z-10 flex items-center gap-2 border-t bg-glass px-4 pt-2 pb-[max(8px,env(safe-area-inset-bottom))] backdrop-blur-xl sm:hidden">
+      {/* Phones: switch between courts and queue; Start Ready Courts stays in reach. */}
+      <nav className="sticky bottom-0 z-10 flex items-center gap-2 border-t bg-glass px-4 pt-2 pb-[max(8px,env(safe-area-inset-bottom))] backdrop-blur-xl min-[701px]:hidden">
         <Seg label="Show" value={tab} onChange={setTab} className="flex-1"
           options={[{ value: 'courts', label: 'Courts' }, { value: 'queue', label: `Queue · ${queue().length}` }]} />
         {fillButton('px-4 text-[15px]')}
@@ -72,7 +72,7 @@ function Toolbar() {
     catch (err) { confirm({ title: "Couldn't import that file", message: err.message, noCancel: true, actions: [{ label: 'OK', strong: true, run() {} }] }); }
   };
   return (
-    <div role="toolbar" aria-label="Session tools" className="flex gap-0.5 rounded-full bg-glass px-1.5 py-1 shadow-[0_1px_4px_rgba(0,0,0,.14)] ring-1 ring-black/5 backdrop-blur-xl max-sm:flex-1 max-sm:justify-between dark:ring-white/10">
+    <div role="toolbar" aria-label="Session tools" className="flex gap-0.5 rounded-full bg-glass px-1.5 py-1 shadow-[0_1px_4px_rgba(0,0,0,.14)] ring-1 ring-black/5 backdrop-blur-xl max-[700px]:flex-1 max-[700px]:justify-between dark:ring-white/10">
       <DropdownMenu>
         <DropdownMenuTrigger asChild><Button variant="ghost" className={tb} aria-label="Options" title="Options"><Settings /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-[230px]">

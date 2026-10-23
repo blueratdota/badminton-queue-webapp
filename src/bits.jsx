@@ -1,6 +1,6 @@
 // Small pieces shared by every screen: skill dots, inset-grouped list sections, the segmented control, confirmations.
 import { cn } from 'cn';
-import { level, r1, SKILL } from './engine';
+import { level, r1, SKILL, streakDots, streakBoost } from './engine';
 import { ui, closeConfirm } from './store';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { AlertDialog, AlertDialogContent, AlertDialogTitle, AlertDialogDescription } from '@/components/ui/alert-dialog';
@@ -11,18 +11,22 @@ export const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 export const row = 'relative min-w-0 px-4 py-[11px]';
 export const btnRow = cn(row, 'flex w-full min-h-11 items-center gap-2.5 text-left active:bg-accent disabled:text-faint');
 
-export const Dots = ({ skill, className }) => (
-  <span aria-hidden="true" className={cn('inline-flex gap-[3px] text-ink', className)}>
-    {[1, 2, 3, 4, 5].map(i => <i key={i} className={cn('size-[7px] rounded-full bg-current', i > level(skill) && 'opacity-20')} />)}
-  </span>
-);
+export function Dots({ skill, boost = 0, className }) {
+  const filled = level(skill), { parts, ring, fire } = streakDots(filled, boost);
+  const dir = boost > 0 ? 'win' : 'loss';
+  return <span role={boost ? 'img' : undefined} aria-label={boost ? `Temporary rating ${boost > 0 ? 'buff' : 'debuff'}` : undefined}
+    aria-hidden={!boost || undefined} className={cn('rating-dots text-ink', boost && dir, className)}>
+    {[1, 2, 3, 4, 5].map(i => <i key={i} className={cn(i <= filled && 'on', ring && i <= filled && 'ring', parts[i - 1] && `${dir} p${parts[i - 1] * 2}`)} />)}
+    {fire && <span className="fire" aria-hidden="true">🔥</span>}
+  </span>;
+}
 
 /** Dots over the rating number; a button when it does something. */
 export function Rating({ p, onClick, label }) {
   const Comp = onClick ? 'button' : 'span';
   return (
     <Comp onClick={onClick} className="flex flex-none flex-col items-center gap-0.5" aria-label={label ?? `Skill ${SKILL[level(p.skill) - 1]}, rating ${r1(p.skill)}`}>
-      <Dots skill={p.skill} /><small className="text-[11px] tabular-nums text-muted-foreground">{r1(p.skill)}</small>
+      <Dots skill={p.skill} boost={p.id ? streakBoost(p.id) : 0} /><small className="text-[11px] tabular-nums text-muted-foreground">{r1(p.skill)}</small>
     </Comp>
   );
 }
