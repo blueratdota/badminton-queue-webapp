@@ -16,7 +16,7 @@ export function CourtCard({ c, next }) {
   const labelId = m?.tm ?? next?.match;
   const gameLabel = t && labelId != null ? t.matches[labelId].label : null;
   const teams = m ? [players(m.a), players(m.b)] : next ? [next.a, next.b] : null;
-  const canSwap = !t && !m && next;
+  const canSwap = !t && !m && next && !next.scheduled;
   const short = NEED[format] - eligible(format).length;
   const options = !t && !m ? next?.options || 0 : 0;
 
@@ -50,7 +50,7 @@ export function CourtCard({ c, next }) {
     >
       <div className="flex min-w-0 flex-wrap items-center gap-2 px-4">
         <h2 className="max-w-[45%] flex-none truncate text-xl font-bold">{c.name}</h2>
-        <span className={cn("court-status", m ? "playing" : next ? "ready" : "waiting")}>{m ? "Playing" : next ? "Ready" : "Waiting"}</span><span className="flex-1" />
+        <span className={cn("court-status", m ? "playing" : next ? "ready" : "waiting")}>{m ? "Playing" : S.ended!=null ? "Ended" : next?.scheduled ? "Scheduled" : next ? "Ready" : "Waiting"}</span><span className="flex-1" />
         {t ? <span className="text-[13px] font-semibold text-muted-foreground">{cap(format)}</span>
           : <Seg small label={`${c.name} format`} value={c.format} disabled={!!m} className="max-w-[100px] min-w-0 flex-[0_1_100px]"
               options={['singles', 'doubles'].map(f => ({ value: f, label: <>{f === 'singles' ? <UserRound className="size-4" /> : <UsersRound className="size-4" />}<span className="sr-only">{cap(f)}</span></> }))}
@@ -90,7 +90,7 @@ export function CourtCard({ c, next }) {
             <Button variant="tinted" size="icon-pill" className="flex-none" onClick={() => act(() => shuffleCourt(c.id))}
               title={singles ? 'Shuffle Opponent' : 'Shuffle Teams'} aria-label={`${singles ? 'Try another opponent' : 'Try other fair teams'} on ${c.name}`}><Shuffle /></Button>
           )}
-          <Button size="pill" className="flex-none" disabled={!next} onClick={() => act(() => fill(c.id))}>Start {cap(format)}</Button>
+          <Button size="pill" className="flex-none" disabled={!next || S.ended!=null} onClick={() => act(() => fill(c.id))}>Start {cap(format)}</Button>
         </>}
       </div>
     </motion.article>

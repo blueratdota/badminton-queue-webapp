@@ -5,7 +5,7 @@ import { motion } from 'framer-motion';
 import { Circle, CircleCheck, History, Plus, Trash2, Trophy, UserPlus, Users, CirclePause } from 'lucide-react';
 import { cn } from 'cn';
 import {
-  getS, SKILL, PREFS, P, level, r1, avg, names, played, wins, score, isDupName, addPlayer, arrive, replacements, replace, courtById, clone,
+  scheduleMatch, scheduledStatus, scheduledDone, scheduledPlaying, cancelScheduled, endLabel, getS, SKILL, PREFS, P, level, r1, avg, names, played, wins, score, isDupName, addPlayer, arrive, replacements, replace, courtById, clone,
   deleteResult, past, returningPlayers, registry, queue, setLock, splitDue, rankingMinimum, places,
   tournamentEntrants, buildTournament, withMatching,
 } from './engine';
@@ -16,7 +16,7 @@ import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 
 const SHEETS = { addPlayer: AddPlayer, edit: EditPlayer, replace: ReplacePlayer, results: Results, sessions: Sessions, returning: Returning,
-  allPlayers: AllPlayers, sessionPlayers: SessionPlayers, pairing: Pairing, tsetup: TournamentSetup };
+  allPlayers: AllPlayers, sessionPlayers: SessionPlayers, scheduled: ScheduledMatches, pairing: Pairing, tsetup: TournamentSetup };
 
 export function Sheets() {
   const m = ui.modal, Sheet = m && SHEETS[m.type];
@@ -277,7 +277,7 @@ function MatchHistory() {
 function Sessions() {
   const S = getS();
   const when = x => new Date(x.date).toLocaleString(undefined, { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  const sub = x => `${x.tournament ? 'Tournament · ' : ''}${plural(x.players.length, 'player')} · ${plural(x.results.length, 'game')}`;
+  const sub = x => `${x.tournament ? 'Tournament · ' : ''}${plural(x.players.length, 'player')} · ${plural(x.results.length, 'game')}${x.ended!=null?' · Ended '+endLabel(x):''}`;
   const askDelete = x => confirm({ title: 'Delete this session and its results?',
     message: `${new Date(x.date).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })} · ${plural(x.results.length, 'game')}. This can't be undone.`,
     actions: [{ label: 'Delete Session', danger: true, run: () => deleteSession(x.id) }] });
@@ -440,4 +440,42 @@ function TournamentSetup({ m }) {
       </Section>
     </Sheet>
   );
+}
+
+function ScheduledMatches() {
+  const S = getS(), [adding,setAdding] = useState(false), [format,setFormat] = useState('doubles');
+  const [slots,setSlots] = useState(['','','','']), [hours,setHours] = useState(S.hours ?? ''), [error,setError] = useState('');
+  const saveRequest = () => {
+    try {
+      const h=Number(hours); if (!Number.isFinite(h)||h<=0) throw new Error('Enter a positive session length in hours.');
+      const previous=S.hours; S.hours=h;
+      try { scheduleMatch(format,slots.slice(0,slots.length/2),slots.slice(slots.length/2)); } catch(e) { S.hours=previous; throw e; }
+      save(); setAdding(false); setError('');
+    } catch(e) { setError(e.message); }
+  };
+  const valid=slots.every(Boolean)&&new Set(slots).size===slots.length&&Number(hours)>0;
+  if (adding) return <Sheet title="Schedule a Match" left={{label:'Back',run:()=>setAdding(false)}} right={{label:'Save',disabled:!valid,run:saveRequest}}>
+    <Section head="Session">
+      <label className={cn(row,'flex justify-between gap-2')}>Length (hours)<input aria-label="Session length (hours)" type="number" min="0.5" step="0.5" value={hours} onChange={e=>setHours(e.target.value)} className="w-24 text-right" /></label>
+      <div className={row}><Seg label="Scheduled match format" value={format} onChange={f=>{setFormat(f);setSlots(Array(f==='singles'?2:4).fill(''));}} options={['singles','doubles'].map(f=>({value:f,label:cap(f)}))} /></div>
+    </Section>
+    {[0,1].map(side=><Section key={side} head={side?'Team B':'Team A'}>{Array.from({length:slots.length/2},(_,n)=>{
+      const k=side*slots.length/2+n;
+      return <label key={k} className={cn(row,'flex justify-between gap-2')}>Player {n+1}<select aria-label={`Team ${side?'B':'A'} player ${n+1}`} value={slots[k]} onChange={e=>setSlots(slots.map((v,i)=>i===k?e.target.value:v))}>
+        <option value="">Choose</option>{S.players.filter(p=>slots[k]===p.id||!slots.includes(p.id)).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+      </select></label>;
+    })}</Section>)}
+    {error&&<p role="alert">{error}</p>}
+    <p className="text-sm text-muted-foreground">Exact teams override matching rules. Everyone active must finish a game first. Players may be held for one typical game; you still press Start.</p>
+  </Sheet>;
+  return <Sheet title="Scheduled Matches" left={null} right={{label:'Done',run:closeModal}}>
+    <Section foot="A match must have time to finish before the session ends. Typical duration uses the last ten completed games (12 minutes without history).">
+      {(S.scheduled||[]).map(r=><div key={r.id} className={cn(row,'grid gap-2')}>
+        <b>{names(r.a)} vs {names(r.b)}</b><small>{cap(r.format)} · {scheduledStatus(r)}</small>
+        {!scheduledDone(r)&&!scheduledPlaying(r)&&<button className="text-left text-destructive" onClick={()=>{cancelScheduled(r.id);save();}}>Cancel Request</button>}
+      </div>)}
+      {!S.scheduled?.length&&<div className={cn(row,'text-muted-foreground')}>No scheduled matches.</div>}
+      <button className={btnRow} disabled={!!S.tournament||S.ended!=null} onClick={()=>{setSlots(['','','','']);setFormat('doubles');setAdding(true);}}>Schedule a Match</button>
+    </Section>
+  </Sheet>;
 }

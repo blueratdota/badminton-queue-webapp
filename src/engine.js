@@ -253,10 +253,11 @@ export function pickDoubles(q, choice = 0, { recent = {}, must = 1, justOff = ne
   const fallback = best ? [] : fairFour(q, must);
   if (!together && (best ? best.justOff : fallback.filter(p => justOff.has(p.id)).length) > 0) {
     const four = restedFour(q, must, justOff);
-    if (four) { const t = lastResortSplits(four)[0]; return { format: 'doubles', a: t.a, b: t.b, options: 1, note: 'uneven teams so nobody goes straight back' }; }
+    if (four && lastResortSplits(four).length) { const t = lastResortSplits(four)[0]; return { format: 'doubles', a: t.a, b: t.b, options: 1, note: 'uneven teams so nobody goes straight back' }; }
   }
   const splits = best ? best.splits : lastResortSplits(fallback);
-  if (!best) note = 'mixed teams, no similar group free';
+  if (!splits.length) return null;
+  if (!best) note = lockCtx && Math.abs(sum(splits[0].a)-sum(splits[0].b))/2>FAIR ? 'uneven teams to keep released teammates apart' : 'mixed teams, no similar group free';
   const s = splits[choice % splits.length];
   return { format: 'doubles', a: s.a, b: s.b, options: splits.length, note };
 }
@@ -270,7 +271,9 @@ export function restedFour(q, must, justOff) {
   for (let k = 3; k < r.length; k++) for (let j = 2; j < k; j++) for (let i = 1; i < j; i++) {
     let ok = true; for (let m = 1; m < must; m++) if (![i, j, k].includes(m)) ok = false;
     if (!ok) continue;
-    const four = [r[0], r[i], r[j], r[k]], t = lastResortSplits(four)[0], gap = Math.abs(sum(t.a) - sum(t.b));
+    const four = [r[0], r[i], r[j], r[k]], t = lastResortSplits(four)[0];
+    if (!t) continue;
+    const gap = Math.abs(sum(t.a) - sum(t.b));
     if (!best || gap < best.gap - 1e-9) best = { gap, four };
   }
   return best && best.four;
@@ -278,9 +281,11 @@ export function restedFour(q, must, justOff) {
 /** Last resort: the fairest split of these four. */
 export function lastResortSplits(four) {
   const s = [...four].sort((x, y) => y.skill - x.skill);
-  const all = [[[s[0], s[3]], [s[1], s[2]]], [[s[0], s[2]], [s[1], s[3]]], [[s[0], s[1]], [s[2], s[3]]]];
-  const t = all.sort((x, y) => Math.abs(sum(x[0]) - sum(x[1])) - Math.abs(sum(y[0]) - sum(y[1])))[0];
-  return [{ a: t[0], b: t[1] }];
+  const all = [[[s[0],s[3]],[s[1],s[2]]],[[s[0],s[2]],[s[1],s[3]]],[[s[0],s[1]],[s[2],s[3]]]];
+  // The fairest raw split can put a released pair back together and deadlock an otherwise playable court.
+  const valid = all.filter(([a,b])=>!lockCtx || keepsLocks(a.map(p=>p.id),b.map(p=>p.id),lockCtx.locks,lockCtx.strict,lockCtx.protection));
+  valid.sort((x,y)=>Math.abs(sum(x[0])-sum(x[1]))-Math.abs(sum(y[0])-sum(y[1])));
+  return valid.length ? [{a:valid[0][0],b:valid[0][1]}] : [];
 }
 export const lastOffCourt = () => { const r = counted().at(-1); return new Set(r ? [...r.a, ...r.b] : []); };
 export const activePlayers = () => S.players.filter(p => !p.paused && !p.away).length; // sitting out and not here don't count
@@ -377,7 +382,7 @@ export function streakBoost(id) {
 /** A late arrival who hasn't played since arriving. */
 export const newcomer = p => !!p.credit && played(p.id) === 0;
 /** Keep locked teams only while normal rest, game-count and opponent-rating rules allow it. */
-export function pick(f, line, choice = 0) {
+export function pick(f, line, choice = 0, allowIdleRelease = false) {
   if (f !== 'doubles') return pickCore(f, line, choice);
   const busy = onCourt(), now = Date.now();
   line = line.filter(p => !(isLocked(p) && busy.has(p.lock) && !splitDue(p.id, p.lock) && now - waitStart(p) < WAIT_PRIORITY));
@@ -406,7 +411,10 @@ export function pick(f, line, choice = 0) {
   const p = core(order); if (p) return p;
   for (const l of locks) if (!l.apart) { const g = lockedGame(order, l, locks); if (g) return g; }
   const held = new Set(locks.filter(l => !l.apart).flatMap(l => [l.x, l.y]));
-  return core(order.filter(p => !held.has(p.id)));
+  const free = core(order.filter(p => !held.has(p.id))); if (free) return free;
+  if (!allowIdleRelease) return null;
+  for (const l of locks) if (!l.apart) { l.apart = true; l.idle = true; }
+  return core(line);
 }
 export function lockProtection(line) {
   const n = gamesCounted(), low = Math.min(...line.map(p => n[p.id])), off = lastOffCourt();
@@ -435,6 +443,7 @@ export function lockNotes(p, locks) {
   const notes = locks.filter(l => l.apart && (ids.has(l.x) || ids.has(l.y))).map(l => {
     const names=`${P(l.x).name} & ${P(l.y).name}`;
     if(splitDue(l.x,l.y)) return names+' cooldown after 3 wins together';
+    if(l.idle) return names+' released to avoid an idle court';
     return names+([P(l.x),P(l.y)].some(p=>Date.now()-waitStart(p)>=WAIT_PRIORITY) ? ` released after ${WAIT_PRIORITY/60000}-minute wait` : ' released to catch up on games');
   });
   if (notes.length) p.note = [p.note,...notes].filter(Boolean).join(' · ');
@@ -538,6 +547,11 @@ export function queueUpNext() {
     .sort((x, y) => cmp([rank(x.c.format), x.i], [rank(y.c.format), y.i])).map(x => x.c);
   // Hand-set lineups and players chosen for manual courts come first; they're off limits to the automatic picks.
   const taken = new Set(open.flatMap(c => { const pl = validPlan(c); return [...(pl ? [...pl.a, ...pl.b] : []), ...(manualSlots(c) || []).filter(Boolean)]; }));
+  const reservation = scheduledReservation();
+  const reserved = new Set(reservation ? [...reservation.a,...reservation.b] : []);
+  const free = onCourt();
+  const scheduledCourt = reservation && ![...reserved].some(id=>free.has(id)||taken.has(id)) ? open.find(c=>c.format===reservation.format&&!c.manual&&!validPlan(c)) : null;
+  reserved.forEach(id=>taken.add(id));
   const out = [];
   for (const c of open) {
     const ms = manualSlots(c);
@@ -547,7 +561,8 @@ export function queueUpNext() {
     }
     const pl = validPlan(c);
     if (pl) { out.push({ format: c.format, a: players(pl.a), b: players(pl.b), court: c.id, options: 2 }); continue; }
-    const p = pick(c.format, eligible(c.format).filter(x => !taken.has(x.id)), c.shuffles || 0);
+    if (scheduledCourt?.id===c.id) { out.push({format:c.format,a:players(reservation.a),b:players(reservation.b),court:c.id,options:1,note:'Scheduled',scheduled:reservation.id}); continue; }
+    const p = pick(c.format, eligible(c.format).filter(x => !taken.has(x.id)), c.shuffles || 0, true);
     if (!p) continue;
     p.court = c.id; [...p.a, ...p.b].forEach(x => taken.add(x.id)); out.push(p);
   }
@@ -606,16 +621,88 @@ export function lockSide(id, side) {
   c.locked = side;
 }
 
+// ---------- scheduled matches ----------
+// Holds and retry windows use the same estimate; no background job or second matching engine.
+export const SCHEDULE_DEFAULT = 12 * 60000;
+export function scheduledDuration(format) {
+  const lens = counted().filter(r => r.a.length === NEED[format] / 2 && r.end > r.start).slice(-10).map(r => r.end - r.start).sort((a,b)=>a-b);
+  if (!lens.length) return SCHEDULE_DEFAULT;
+  const m = Math.floor(lens.length / 2);
+  return lens.length % 2 ? lens[m] : (lens[m-1] + lens[m]) / 2;
+}
+export function normalizeEnd(x = S) {
+  const last = x.results.filter(r => r.winner != null && Number.isFinite(r.end)).map(r => r.end);
+  if (x.ended != null && last.length) x.ended = Math.max(...last);
+}
+export function endLabel(x) {
+  if (x.ended == null) return '';
+  return new Date(x.ended).toLocaleString(undefined, { ...(new Date(x.ended).toDateString() !== new Date(x.date).toDateString() ? {year:'numeric',month:'short',day:'numeric'} : {}),hour:'numeric',minute:'2-digit' });
+}
+export function scheduleMatch(format, a, b) {
+  const ids = [...a,...b];
+  if (S.ended != null || S.tournament) throw new Error('Scheduled matches are available in live queue sessions.');
+  if (!Number.isFinite(S.hours) || !(S.hours > 0)) throw new Error('Set the session length first.');
+  if (!NEED[format] || a.length !== NEED[format]/2 || b.length !== a.length || new Set(ids).size !== NEED[format] || ids.some(id=>!P(id))) throw new Error('Choose distinct players for both teams.');
+  const request = {id:uid(),format,a:[...a],b:[...b]};
+  (S.scheduled ||= []).push(request); refreshSchedule(); return request.id;
+}
+export const scheduledDone = r => counted().some(g => g.scheduled === r.id);
+export const scheduledPlaying = r => S.courts.some(c => c.match?.scheduled === r.id);
+export function scheduleBlock(r) {
+  if (S.ended != null) return 'Session ended';
+  if (S.tournament) return 'Waiting for queue mode';
+  if (!S.scheduleUnlocked || [...r.a,...r.b].some(id=>played(id)===0)) return 'Waiting for first round';
+  if (!endsAt() || Date.now()+scheduledDuration(r.format)>endsAt()) return 'Insufficient time';
+  const ids = [...r.a,...r.b];
+  if (ids.some(id=>!P(id) || P(id).away || P(id).paused) || ids.every(id=>onCourt().has(id))) return 'Waiting for players';
+  const pinned = S.courts.flatMap(c=>c.manual ? c.manual.filter(Boolean) : validPlan(c) ? [...c.plan.a,...c.plan.b] : []);
+  if (ids.some(id=>pinned.includes(id))) return 'Waiting for manual lineup';
+  if (!S.courts.some(c=>c.format===r.format && !c.manual && !validPlan(c))) return 'Waiting for court';
+  return null;
+}
+export function refreshSchedule() {
+  const active = S.players.filter(p=>!p.away&&!p.paused);
+  if (!S.scheduleUnlocked && active.length && active.every(p=>played(p.id)>0)) S.scheduleUnlocked = true;
+  let held = false;
+  for (const r of S.scheduled || []) {
+    if (scheduledDone(r) || scheduledPlaying(r)) { r.heldAt = null; continue; }
+    const duration = scheduledDuration(r.format), blocked = scheduleBlock(r);
+    if (r.heldAt != null && Date.now() >= r.heldAt+duration) { r.heldAt=null; r.retryAt=Date.now()+duration; }
+    if (blocked || held) r.heldAt=null;
+    if (!blocked && !held && !(r.retryAt>Date.now())) { r.heldAt ??= Date.now(); held=true; }
+  }
+}
+export function scheduledReservation() {
+  return (S.scheduled||[]).find(r=>!scheduledDone(r)&&!scheduledPlaying(r)&&r.heldAt!=null&&Date.now()<r.heldAt+scheduledDuration(r.format)&&!scheduleBlock(r)) || null;
+}
+export function scheduledStatus(r) {
+  if (scheduledDone(r)) return 'Completed';
+  if (scheduledPlaying(r)) return 'Playing';
+  const blocked = scheduleBlock(r); if (blocked) return blocked;
+  if (r.retryAt>Date.now()) return 'Waiting for next reservation';
+  const busy=onCourt();
+  if ([...r.a,...r.b].some(id=>busy.has(id))) return 'Waiting for players';
+  return scheduledReservation()?.id===r.id && S.courts.some(c=>!c.match&&c.format===r.format&&!c.manual&&!validPlan(c)) ? 'Ready' : 'Waiting for court';
+}
+export function cancelScheduled(id) { if (S.courts.some(c=>c.match?.scheduled===id)) throw new Error('Finish or cancel the game on its court first.'); S.scheduled=(S.scheduled||[]).filter(r=>r.id!==id); refreshSchedule(); }
+
 // ---------- actions ----------
 /** Start: begins `shown` (the game the screen drew for this court) while all four are still free, so the lineup never changes
     on Start. Who's overdue moves with the clock between redraws. Otherwise Up Next now. */
 export function fill(cid, shown) {
   const c = courtById(cid); if (!c || c.match) return;
+  refreshSchedule();
+  if (S.ended != null) return;
   const free = new Set(queue().map(p => p.id));
   const p = shown && [...shown.a, ...shown.b].every(x => free.has(x.id)) ? shown : nextPairing(c);
   if (!p) return;
-  c.match = { a: p.a.map(x => x.id), b: p.b.map(x => x.id), start: Date.now(), tm: p.match ?? null };
+  const current = p.scheduled && queueUpNext().find(g=>g.court===cid&&g.scheduled===p.scheduled);
+  if (p.scheduled && (!current || current.a.map(x=>x.id).join()!==p.a.map(x=>x.id).join() || current.b.map(x=>x.id).join()!==p.b.map(x=>x.id).join())) return;
+  const held=scheduledReservation();
+  if (!p.scheduled && held && [...p.a,...p.b].some(x=>[...held.a,...held.b].includes(x.id))) return;
+  c.match = { a: p.a.map(x => x.id), b: p.b.map(x => x.id), start: Date.now(), tm: p.match ?? null, scheduled:p.scheduled ?? null };
   c.shuffles = 0; c.plan = null; c.locked = null;
+  refreshSchedule();
 }
 export const ratingChange = (ta, tb, aWon) => K * ((aWon ? 1 : 0) - 1 / (1 + 10 ** ((tb - ta) / SPREAD)));
 /** Standings score, 0–100: the win rate with two extra wins and two extra losses, so one or two lucky games can't top
@@ -642,7 +729,7 @@ export function adjust(ids, d) {
     cancelled: it's kept in the history, but like Undo Start the players are back exactly where they were in line. */
 export function finish(cid, winner) {
   const c = courtById(cid); const m = c?.match; if (!m) return;
-  const r = { a: m.a, b: m.b, winner, court: c.name, start: m.start, end: Date.now(), changes: null, label: null };
+  const r = { a: m.a, b: m.b, winner, court: c.name, start: m.start, end: Date.now(), changes: null, label: null, scheduled:m.scheduled ?? null };
   if (winner != null) {
     // A win is a win: game length isn't counted (games to 11 and to 21 last very different times).
     const d = ratingChange(avg(m.a), avg(m.b), winner === 0);
@@ -653,20 +740,22 @@ export function finish(cid, winner) {
   const now = Date.now();
   if (winner != null) [...m.a, ...m.b].forEach((id, n) => { const p = P(id); if (p) { p.readyAt = now + n; p.first = false; p.since = now; } });
   c.match = null;
+  refreshSchedule();
   if (winner != null) c.manual = null; // a finished game ends manual mode; a cancelled one keeps the lineup, like Undo Start
 }
 /** End Session: games still on court are cancelled, then the session is marked ended. */
-export function endSession() { for (const c of S.courts) if (c.match) finish(c.id, null); S.ended = Date.now(); }
+export function endSession() { for (const c of S.courts) if (c.match) finish(c.id, null); S.ended = Date.now(); normalizeEnd(); refreshSchedule(); }
 export function deleteResult(i) {
   const r = S.results.splice(i, 1)[0];
   for (const [id, d] of Object.entries(r.changes || {})) { const p = P(id); if (p) p.skill -= d; }
+  normalizeEnd(); refreshSchedule();
 }
 /** Corrects a finished game's result (0 = team A won, 1 = team B, null = cancelled): undoes the rating change it made,
     then applies the corrected one, worked out as when a game finishes. Places in line aren't touched. */
 export function setWinner(i, winner) {
   const r = S.results[i]; if (!r || r.winner === winner) return;
   for (const [id, d] of Object.entries(r.changes || {})) { const p = P(id); if (p) p.skill -= d; }
-  r.changes = null; r.winner = winner;
+  r.changes = null; r.winner = winner; normalizeEnd();
   if (winner == null) return;
   const d = ratingChange(avg(r.a), avg(r.b), winner === 0);
   r.changes = { ...adjust(r.a, d), ...adjust(r.b, -d) };

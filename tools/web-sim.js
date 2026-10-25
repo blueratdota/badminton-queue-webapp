@@ -22,6 +22,7 @@ if (process.argv.includes('--parity')) { // one night with nothing random; same 
   const byName = Object.fromEntries(S.players.map(p => [p.name, p.id])), truth = Object.fromEntries(S.players.map(p => [p.id, p.skill]));
   for (const [x, y] of pairs) page.setPartner(byName[x], byName[y]);
   for (const [x, y] of locks) page.setLock(byName[x], byName[y]); // --locks "A,B;C,D"
+  if (opt('scheduled', '')) { S.hours=3; for (const item of opt('scheduled','').split(';')) { const sides=item.split('|').map(t=>t.split(',').map(n=>byName[n.trim()])); if(sides.length===2) page.scheduleMatch('doubles',sides[0],sides[1]); } }
   const lines = [], ends = {}, winners = {}; let k = 0;
   const drawsFile = opt('draws', null), draws = drawsFile ? JSON.parse(fs.readFileSync(drawsFile, 'utf8')) : null; // [[minutes, u], ...]
   while (true) {

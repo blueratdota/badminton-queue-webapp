@@ -1,7 +1,7 @@
 // The app's state around the engine: which sessions exist and which is open, saving them in this browser,
 // what sheet or confirmation is showing, and the theme. Components re-render through useStore().
 import { useSyncExternalStore } from 'react';
-import { LS_KEY, THEME_KEY, blankSession, nextSession, past, getS, setS, getSessions, setSessions, getCurrentId, setCurrentId } from './engine';
+import { refreshSchedule, normalizeEnd, LS_KEY, THEME_KEY, blankSession, nextSession, past, getS, setS, getSessions, setSessions, getCurrentId, setCurrentId } from './engine';
 
 // ---------- re-rendering ----------
 let version = 0;
@@ -31,7 +31,7 @@ function persist() {
 }
 
 /** Save the open session and redraw: what every change to it ends with. */
-export function save() { persist(); bump(); }
+export function save() { refreshSchedule(); persist(); bump(); }
 /** Run a change to the open session, then save it. */
 export const act = fn => { fn(); save(); };
 export function switchTo(id) { setCurrentId(id); setS(getSessions().get(id)); persist(); bump(); }
@@ -55,7 +55,7 @@ export function importData(text) {
   const d = JSON.parse(text);
   const list = (d?.sessions || []).filter(x => x && x.id && Array.isArray(x.players) && Array.isArray(x.courts) && Array.isArray(x.results));
   if (!list.length) throw new Error('No sessions found in that file.');
-  for (const x of list) getSessions().set(x.id, x);
+  for (const x of list) { normalizeEnd(x); getSessions().set(x.id, x); }
   switchTo(getSessions().has(d.currentId) ? d.currentId : list.sort((a, b) => b.date - a.date)[0].id);
   return list.length;
 }
@@ -64,7 +64,9 @@ export function importData(text) {
 function load() {
   try { const d = JSON.parse(localStorage.getItem(LS_KEY)); if (d?.sessions?.length) { setSessions(new Map(d.sessions.map(x => [x.id, x]))); setCurrentId(d.currentId); } } catch {}
   if (!getSessions().has(getCurrentId())) { const x = getSessions().size ? [...getSessions().values()].sort((a, b) => b.date - a.date)[0] : blankSession(); getSessions().set(x.id, x); setCurrentId(x.id); persist(); }
+  for (const x of getSessions().values()) normalizeEnd(x);
   setS(getSessions().get(getCurrentId()));
+  refreshSchedule(); persist();
 }
 load();
 // Another tab of the app saved: show its data, so this tab doesn't overwrite it with an older copy.
@@ -77,3 +79,6 @@ const applyTheme = () => { const v = theme(); document.documentElement.classList
 export function setTheme(v) { try { localStorage.setItem(THEME_KEY, v); } catch {} applyTheme(); bump(); }
 dark.addEventListener('change', applyTheme);
 applyTheme();
+
+// Reservations expire and rejoin the ordinary rotation while the app is open.
+setInterval(() => { const s=getS(), before=JSON.stringify([s.scheduled,s.scheduleUnlocked]); refreshSchedule(); if (before!==JSON.stringify([s.scheduled,s.scheduleUnlocked])) save(); }, 5000);

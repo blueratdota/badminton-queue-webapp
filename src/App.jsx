@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarDays, History, Link2, Settings, SquarePlus, Trophy, Upload, Download, UserPlus, Users, UsersRound } from 'lucide-react';
 import { cn } from 'cn';
-import { getS, upNext, nextPairing, withMatching, court, fill, queue } from './engine';
+import { endSession, endLabel, getS, upNext, nextPairing, withMatching, court, fill, queue } from './engine';
 import { useStore, bump, act, openModal, confirm, exportData, importData, theme, setTheme } from './store';
 import { CourtCard } from './Courts';
 import { SidePanel } from './Queue';
@@ -22,7 +22,7 @@ export default function App() {
   // One run of the matching per change, shared by every court card and Up Next (the preview is what Start begins).
   const next = useMemo(() => withMatching(() => ({ up: upNext(), byCourt: new Map(S.courts.map(c => [c.id, nextPairing(c)])) })), [version, S]);
 
-  const canFill = S.courts.some(c => next.byCourt.get(c.id));
+  const canFill = S.ended == null && S.courts.some(c => next.byCourt.get(c.id));
   const fillAll = () => act(() => S.courts.forEach(c => fill(c.id)));
   const fillButton = cls => <Button size="pill" className={cn('px-5 text-[17px]', cls)} disabled={!canFill} onClick={fillAll}>Start Ready Courts</Button>;
 
@@ -76,6 +76,10 @@ function Toolbar() {
       <DropdownMenu>
         <DropdownMenuTrigger asChild><Button variant="ghost" className={tb} aria-label="Settings" title="Settings"><Settings /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-[230px]">
+          <DropdownMenuItem onSelect={() => openModal({type:'scheduled'})}>Scheduled Matches</DropdownMenuItem>
+          {S.ended==null ? <DropdownMenuItem onSelect={()=>confirm({title:'End this session?',message:'Unfinished games are cancelled. The end date comes from the last completed game.',actions:[{label:'End Session',danger:true,run:()=>act(endSession)}]})}>End Session</DropdownMenuItem>
+            : <><DropdownMenuLabel>Ended {endLabel(S)}</DropdownMenuLabel><DropdownMenuItem onSelect={()=>act(()=>{S.ended=null;})}>Reopen Session</DropdownMenuItem></>}
+          <DropdownMenuSeparator />
           <DropdownMenuLabel>Mode</DropdownMenuLabel>
           <DropdownMenuRadioGroup value={S.tournament ? 'tournament' : 'queue'} onValueChange={v => {
             if (v === 'tournament' && !S.tournament) openModal({ type: 'tsetup', format: 'doubles', advance: 4 });

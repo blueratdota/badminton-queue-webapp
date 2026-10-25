@@ -1,0 +1,66 @@
+// Same scenarios run against the React engine and the single-file web frontend.
+const assert = require('node:assert/strict');
+const load = require('./load-page');
+const p = load(process.argv[2] || 'src/engine.js');
+const originalNow=Date.now; let now=1e12; Date.now=()=>now;
+const t0=now;
+function fixture(n=8) {
+  now=t0;
+  const s={id:'schedule-test',date:now-3600000,hours:3,players:Array.from({length:n},(_,i)=>({id:'p'+i,name:'Player '+i,skill:i<2?5:2,pref:'any',readyAt:now+i,paused:false})),courts:[p.court('Court 1','doubles'),p.court('Court 2','doubles')],results:[],tournament:null};
+  p.set('S',s);return s;
+}
+function round(s) {
+  for(let i=0;i<s.players.length;i+=4) s.results.push({a:s.players.slice(i,i+2).map(x=>x.id),b:s.players.slice(i+2,i+4).map(x=>x.id),winner:0,start:now-3600000,end:now-2880000,changes:{}});
+  p.refreshSchedule();
+}
+function request(a=['p0','p1'],b=['p2','p3']) { return p.scheduleMatch('doubles',a,b); }
+try {
+  let s=fixture(); const id=request();
+  assert.equal(s.scheduleUnlocked,undefined); assert.equal(p.scheduledReservation(),null);
+  assert.throws(()=>request(['p0','p0']));
+  round(s); assert.equal(s.scheduleUnlocked,true); assert.equal(p.scheduledReservation().id,id);
+  let game=p.queueUpNext().find(x=>x.scheduled===id); assert(game);
+  assert.deepEqual(game.a.map(x=>x.id),['p0','p1']); assert.deepEqual(game.b.map(x=>x.id),['p2','p3']);
+  assert(!p.queueUpNext().filter(x=>!x.scheduled).some(x=>[...x.a,...x.b].some(y=>['p0','p1','p2','p3'].includes(y.id))));
+  s.players.push({id:'late',name:'Late',skill:3,pref:'any',readyAt:now,paused:false}); p.refreshSchedule(); assert(s.scheduleUnlocked); assert(p.scheduledReservation());
+  now+=p.scheduledDuration('doubles');p.refreshSchedule(); assert.equal(p.scheduledReservation(),null); assert(s.scheduled[0].retryAt>now);
+  now=s.scheduled[0].retryAt;p.refreshSchedule(); assert(p.scheduledReservation());
+  s.players[0].paused=true;p.refreshSchedule();assert.equal(p.scheduledReservation(),null);s.players[0].paused=false;p.refreshSchedule();assert(p.scheduledReservation());
+  game=p.queueUpNext().find(x=>x.scheduled===id);
+  s.courts.find(c=>c.id===game.court).plan={a:['p4','p5'],b:['p6','p7']};
+  p.fill(game.court,game);assert(!s.courts.find(c=>c.id===game.court).match,'stale scheduled preview cannot replace manual lineup');
+  s.courts.forEach(c=>c.plan=null); p.refreshSchedule();game=p.queueUpNext().find(x=>x.scheduled===id);
+  p.fill(game.court,game); assert.equal(s.courts.find(c=>c.id===game.court).match.scheduled,id);
+  p.finish(game.court,null); assert(!p.scheduledDone(s.scheduled[0]));p.refreshSchedule();assert(p.scheduledReservation());
+  game=p.queueUpNext().find(x=>x.scheduled===id);p.fill(game.court,game);p.finish(game.court,0);assert(p.scheduledDone(s.scheduled[0]));assert(!p.queueUpNext().some(x=>x.scheduled===id));
+  s=fixture();round(s);const first=request();request(['p4','p5'],['p6','p7']);
+  s.courts[0].manual=['p0','p4',null,null];p.refreshSchedule();assert.equal(p.scheduledReservation(),null,'both requests conflict with manual players');
+  s.courts[0].manual=['p0',null,null,null];p.refreshSchedule();assert.equal(p.scheduledReservation().id,s.scheduled[1].id,'skip blocked first request');
+  s=fixture();round(s);s.courts[0].match={a:['p0','p1'],b:['p2','p3'],start:now};request();const readyLater=request(['p4','p5'],['p6','p7']);
+  assert.equal(p.scheduledReservation().id,readyLater,'all-busy request must not block a ready later request');
+  assert(p.queueUpNext().some(g=>g.scheduled===readyLater));
+  s=fixture();round(s);const reqA=request(),reqB=request(['p4','p5'],['p6','p7']);
+  let next=p.queueUpNext().find(g=>g.scheduled===reqA);p.fill(next.court,next);
+  next=p.queueUpNext().find(g=>g.scheduled===reqB);assert(next,'starting one request updates the next reservation immediately');p.fill(next.court,next);assert.equal(s.courts.filter(c=>c.match?.scheduled).length,2);
+  s=fixture();round(s);request();request(['p0','p4'],['p5','p6']);assert.equal(p.queueUpNext().filter(x=>x.scheduled).length,1);
+  s.courts[0].match={a:['p0','p4'],b:['p5','p6'],start:now};p.refreshSchedule();assert(p.scheduledReservation());assert(!p.queueUpNext().some(x=>x.scheduled));
+  s=fixture();round(s);request();now=p.endsAt()-p.scheduledDuration('doubles')+1;p.refreshSchedule();assert.equal(p.scheduledStatus(s.scheduled[0]),'Insufficient time');assert.equal(p.scheduledReservation(),null);
+  s=fixture();round(s);request();game=p.queueUpNext().find(x=>x.scheduled);now=p.endsAt();p.fill(game.court,game);assert(!s.courts.some(c=>c.match),'Start revalidates deadline');
+  s=fixture();round(s);const last=Math.max(...s.results.map(x=>x.end));s.courts[0].match={a:['p0','p1'],b:['p2','p3'],start:now-60000};now+=86400000;p.endSession();assert.equal(s.ended,last);assert.equal(s.results.at(-1).winner,null);
+  s.results.push({a:['p0'],b:['p1'],winner:0,start:now-120000,end:now-60000,changes:{}});p.normalizeEnd();assert.equal(s.ended,now-60000);p.deleteResult(s.results.length-1);assert.equal(s.ended,last);
+  p.setWinner(1,null);assert.equal(s.ended,s.results[0].end);
+  s=fixture();p.endSession();assert.equal(s.ended,now);s.ended=now-60000;p.normalizeEnd();assert.equal(s.ended,now-60000);
+  s=fixture();assert.equal(p.scheduledDuration('doubles'),720000);s.results=[{a:['p0','p1'],b:['p2','p3'],winner:0,start:now-1200000,end:now-600000},{a:['p4','p5'],b:['p6','p7'],winner:0,start:now-1200000,end:now-360000}];assert.equal(p.scheduledDuration('doubles'),720000);
+  round(s);request();assert(!p.nextSession(true).scheduled);
+  s=fixture(4);s.courts=s.courts.slice(0,1);p.setLock('p0','p1');
+  assert.equal(p.pick('doubles',p.queue()),null,'generic projections retain locks');
+  game=p.queueUpNext()[0];assert(game?.note.includes('avoid an idle court'));
+  assert.notEqual(game.a.some(x=>x.id==='p0'),game.a.some(x=>x.id==='p1'),'open court splits instead of using weaker opponents');
+  s=fixture(6);s.courts=s.courts.slice(0,1);p.setLock('p0','p1');game=p.queueUpNext()[0];
+  assert(![...game.a,...game.b].some(x=>['p0','p1'].includes(x.id)),'other legal players go first while locked pair waits');
+  s=fixture(4);s.courts=s.courts.slice(0,1);s.players.forEach((x,i)=>x.skill=[5,1,4,2][i]);p.setLock('p0','p1');
+  p.set('lockCtx',{locks:[{x:'p0',y:'p1',apart:true}],strict:true,protection:p.lockProtection(s.players)});
+  const legal=p.lastResortSplits(s.players)[0];p.set('lockCtx',null);
+  assert(legal);assert.notEqual(legal.a.some(x=>x.id==='p0'),legal.a.some(x=>x.id==='p1'),'fallback tries another split when fairest split reunites released partners');
+  console.log('scheduled-match and end-date checks pass');
+} finally { Date.now=originalNow; }
