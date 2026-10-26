@@ -24,3 +24,5 @@ Ended sessions show the last completed game's actual end, including the date whe
 Immediate scheduled returners receive +2 ordinary queue priority games; this drops to +1 and then zero after their next two completed ordinary games. Reservations no longer expire.
 
 Active reservations remain stable. Only the final returning group receives the immediate-return penalty. Penalized players need one completed ordinary game before another scheduled match. Held players may fill an otherwise idle court once per active request; subsequent holding ensures the scheduled group can gather.
+
+Queue simplification: roster-size switching, repeat-driven group selection and overdue priority are paused. Balanced recalls stay within one counted game; selected foursomes rotate balanced teams. Locked pairs use real-average opponents from -0.50 to +1.25 and wait 30 minutes before splitting. Ready scheduled requests persist a court assignment with Postpone 10 min and Cancel controls.

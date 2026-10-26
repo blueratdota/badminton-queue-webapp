@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "npm run check && vite build",
     "preview": "vite preview",
-    "check": "node tools/web-check.js src/engine.js && node tools/frontend-check.js && node tools/scheduled-check.js src/engine.js",
+    "check": "node tools/web-check.js src/engine.js && node tools/frontend-check.js && node tools/scheduled-check.js src/engine.js && node tools/queue-simplified-check.js src/engine.js",
     "sim": "node tools/web-sim.js src/engine.js",
     "scan": "node tools/web-scan.js src/engine.js"
   },

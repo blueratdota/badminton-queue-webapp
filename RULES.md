@@ -1,6 +1,6 @@
 # Shuttle Queue: how the app works
 
-The rules the iPad app and the web version follow, as of Oct 23, 2026. Both are kept in sync.
+The rules the iPad app and the web version follow, as of Oct 26, 2026. Both are kept in sync.
 
 ---
 
@@ -28,7 +28,7 @@ The rules the iPad app and the web version follow, as of Oct 23, 2026. Both are 
   - Add players from the person-plus button on the Dashboard: **New Player**, or **From Earlier Sessions** (brings back their latest rating).
   - **Session Players** (Home, or the Dashboard's person-plus menu): everyone in this session with where they are (on a court, waiting and their place in line, or sitting out), games, what they play and rating. Tap a player to edit them; add players from the top of the list (New Player or From Earlier Sessions).
 - **All Players** (main menu) lists everyone across all sessions, with their latest rating, sessions, games and wins. Tap someone to change their name or rating: it changes in every session they're in, past ones included (games already played keep the rating changes they recorded).
-- **Minutes waited:** each queue row shows how long that player has been waiting ("7 played · 12 min"), on the wait rule's clock: since their last game or arrival, never before the session's first game, and sitting out doesn't restart it. It turns orange at 20 minutes, when the wait rule puts them in the next game.
+- **Minutes waited:** each queue row shows how long that player has been waiting ("7 played · 12 min"), on the wait rule's clock: since their last game or arrival, never before the session's first game, and sitting out doesn't restart it. Waiting time is informational; it does not trigger an overdue priority or color change.
 - **Queue actions:** queue rows prioritize name, games played and minutes waited. Tap a player to edit their name, rating, what they play, or sit them out. Tap **⋯** or press and hold for:
   - Edit Name or Rating
   - Sit Out / Back In
@@ -43,10 +43,10 @@ Everyone off court is in line in this order:
 
 1. **Moved to Front**, by hand. This lasts until their next game ends.
 2. **Just came off court:** the four from the most recently finished game go behind everyone rested, even if they're behind on games, so nobody is called straight back on court. (A late arrival's credit can leave them the fewest games after their first game; this keeps them from going straight back.)
-3. **Fewest games counted.** That's games played this session plus any arrival credit (see §3).
+3. **Fewest games counted.** Actual completed games plus arrival credit and any remaining scheduled-match priority penalty. Played and standings still show actual games.
 4. **Longest rested:** earliest to come off court or arrive.
 
-**Ties on fewest games (doubles):** when several people are tied on the fewest games, whoever is hardest to match (fewest similar-level players waiting, within 1 level) starts the next game, instead of the longest rested. Nobody with more games jumps ahead, and it doesn't apply to anyone moved to the front, while someone has waited 20+ minutes, or in balanced-only mode. Without it, the strongest players got about 0.5 fewer games a night than mid-rated players, because they're rarely picked to fill someone else's game. In a simulation of 27 players on 3 courts, the strongest four went from 6.5 to 7.0 games a night, nights ending within 1 game from 36% to 63%, and games within 1 level from 64% to 61%.
+**Ties on fewest games (doubles):** when several people are tied on the fewest games, whoever is hardest to match (fewest similar-level players waiting, within 1 level) starts the next game, instead of the longest rested. Nobody with more games jumps ahead, and it doesn't apply to anyone moved to the front, when the organizer has moved someone to the front. Without it, the strongest players got about 0.5 fewer games a night than mid-rated players, because they're rarely picked to fill someone else's game. In a simulation of 27 players on 3 courts, the strongest four went from 6.5 to 7.0 games a night, nights ending within 1 game from 36% to 63%, and games within 1 level from 64% to 61%.
 
 Other queue rules:
 - **Sitting out** players keep their place in the list but aren't picked. When they come back in, their game count stays the same and their wait clock keeps running from before they sat out.
@@ -80,50 +80,28 @@ Credit only affects queue order. Standings and game counts show games actually p
 
 ## 5. Doubles matching
 
-For each open doubles court, the **first player in line always plays**. The other three are chosen in this order of preference:
+- **Game counts first:** use the player due next, then try to give turns to players with the fewest counted games. An equal-count selection is preferred; if it cannot form a balanced game, try other legal selections. Manual Move to Front and the existing hardest-to-match tie-break remain.
+- **Same method at every roster size:** try four players within **1.0 rating level**, then **1.5 levels**, then mixed balanced teams from nearby ratings. Roster-size switching is paused.
+- **Rested balanced games first:** prefer rested players. If rested players cannot make a balanced game, recalling someone from the most recently completed game is allowed before accepting uneven teams. Each recalled player must be no more than **one counted game ahead** of the least-played eligible waiting player. Locked-team and hot/cold searches obey the same cap.
+- **Balanced means** team averages within **0.75**, using streak-adjusted matching ratings. If no balanced game is possible within the restrictions, the players due next play the fairest legal split, even if the gap is wider. An intact locked team's explicit rating band below overrides the ordinary 0.75 limit.
+- **Repeated foursomes are allowed.** Partner/opponent repeat points, repeat thresholds, and the repeat exception to equal-game selection are paused. History must not change which players get the turn.
+- **Rotate teams within the selected four:** among balanced legal splits, prefer the one whose most recently used partnership was used longest ago; ties favor the smaller team gap, then stable order. Locked partnerships and hot/cold forced pairing take precedence. Shuffle cycles those legal splits.
+- **Pair requests:** old Increase Pairing % requests have no effect; use Locked Teammates.
 
-1. **Similar skill:** all four within **1.0 level** of each other.
-2. **Wider range:** all four within **1.5 levels**. Used only when every similar group would repeat recent partners or opponents, or would call someone straight back on court.
-3. **Balanced teams from the nearest ratings:** mixed levels, choosing the four whose ratings are closest together, with team averages within 0.75 of each other. Used when no similar or wider group works.
-4. **Any fair four from the front of the line,** as a last resort.
+### Locked teammates
 
-**Even games:** nobody plays again while someone with fewer games is left waiting. The four in a game all have no more games than the fewest among everyone else waiting (counting a late arrival's credit, so late arrivals count at par). Steps 1–4 then run among those players, so similar groups still form whenever counts allow, and near the end of each round games mix levels instead of leaving someone behind. Exception: if the even game would bring back four who all met lately (6+ repeat points), the usual pick is used if it repeats less. If no game passes, the rule is dropped for that game.
-- **In a simulation** of 21 real players on 3 courts, 2 hours, 100 nights: someone ended 2+ games behind on 3% of nights (63% for similar groups without this rule), with all four within 1 level in 36% of games (37%) and the same four again 0.19 times a night (0.11). Waits were unchanged (longest 27 minutes).
+- An intact pair faces opponents whose **real average rating** is between **0.50 lower and 1.25 higher**, inclusive. A 3.50 pair can face averages **3.00–4.75**. Temporary streak boosts do not change this eligibility band.
+- Locked-game participants remain at most **one counted game ahead** of the least-played eligible waiting player. Balanced recalls within that limit are allowed.
+- If no suitable game exists, the pair waits. Only after either partner has waited **30 minutes** may it temporarily play independently. Falling behind on games or leaving a court idle does not release it early. A free player also waits for a partner still playing elsewhere, up to this timeout.
+- If a partner is absent or sitting out, the other plays independently. Exact scheduled teams may override locks.
+- After **three consecutive wins together**, each partner must complete a game without the other as teammate. They need not face each other, and they do not wait for the other partner's separate court to finish during this cooldown. The lock resumes after both have played independently.
+- New sessions copied from this one retain locks when both partners come along.
 
-**Too few players for similar groups:** when every court is doubles and fewer than **6.25 players per court** are here (13 for 2 courts, 19 for 3, 25 for 4; anyone sitting out or not here yet doesn't count), steps 1–2 are skipped. Each game is the first in line plus the next players in line (fewest games, then longest rested) who make even teams (averages within 0.75), avoiding heavy repeats, with no preference for similar ratings. The queue footer says when this is on, and it switches back automatically once enough players are here.
-- **Why 6.25:** with the even-games rule, similar groups beat balanced teams from 18–19 players on 3 courts. In the simulation of the same 21 players, all four within 1 level went from 16% of games (balanced) to 36%, games spread over 2 levels from 15.3 to 5.6 a night, and nights with someone 2+ games behind from 19% to 3%. The same four met again 0.19 times a night (0.06). On 2 courts at 13–14 players and on 4 courts at 25–26, similar groups also gave more games within 1 level (33–49% against 25–31%) with game counts as even or more even. Below about 17 players on 3 courts, similar groups don't help.
+## 6. Waiting time
 
-Within those steps:
-- **Rest first.** Nobody who just came off court (the four from the most recently finished game) is called straight back while four rested players are waiting. This beats skill match and even teams: if the rested players can't make teams within 0.75, the evenest four of them play anyway, strongest teamed with weakest ("uneven teams so nobody goes straight back"). The first in line and anyone overdue still always play.
-- **Avoiding repeats.** "Recent" means each player's last 3 doubles games. Each pair of the four who shared a recent game costs 1 point. Each team that partnered recently costs 2 more.
-  - At **3 or more points** (a rematch of the same four always is), the app tries the next step up.
-  - Below that, repeats only break ties (see below).
-- **Fewest games first.** Among groups that call nobody straight back and don't repeat too much, the other three are the ones with the fewest games (counting a late arrival's credit), then fewer repeat points, then whoever has waited longest. Without this, mid-rated players got pulled into far more games than the strongest and weakest (about 7.6 against 6.6 a night); now everyone gets about 6.9–7.4. In the balanced-teams step, the nearest ratings (in quarter levels) come first, then fewest games.
-- **Team split:** the fairest way to split the four into two teams, with team averages within 0.75. The two strongest are never put together when a fair split exists.
-- **Pair requests:** the old Increase Pairing % feature has been removed. Old requests no longer affect matching. Use Locked Teammates for players who should stay together.
-- **Locked teammates** (Settings, Locked Teammates): two players who always play doubles as a team. The queue row shows "with" their teammate; the sheet lists each pair with its status and average, **Add Locked Pair** picks two doubles players who aren't locked yet.
-  - **Opponents:** a team whose average (real ratings) is at least theirs, within 0.05. The app searches the full waiting line. Normal rest protection still applies, and no player in a locked-team game can be more than **1 counted game ahead** of the fewest among those waiting. If no suitable match is available once either partner has waited **20 minutes**, the lock temporarily relaxes and they can be selected independently; this starts early to help meet the 30-minute wait target. If an unmatchable pair falls **2 games behind** another waiting player, the lock relaxes sooner so they can catch up. Other players can fill the court while they wait. **Idle-court safeguard:** an open automatic court first tries all legal games with those locks intact. Only if none can start may it temporarily split unmatchable pairs immediately. If a free player’s locked partner is already playing elsewhere, the free player may also play independently under this idle-court safeguard. Busy-court forecasts retain the usual waiting rule; the three-win cooldown still applies.
-  - **After 3 wins in a row together**, each must play one game without the other as teammate. They are selected independently and do not wait for each other’s court to finish. They may naturally face each other, but the app does not require that; the lock resumes after both have played.
-  - **In line:** the pair stands side by side. If nothing fair keeps the lock, a pair at the front (or overdue) gets a game built around them with two others; otherwise they wait for the next game. A locked pair is overdue together, and at most one locked pair has to play in a game.
-  - **One missing:** while one is sitting out or not here, the other plays like anyone else. While one is still on court, the other waits for them, up to 20 minutes, except during a three-win cooldown.
-  - New sessions copied from this one keep the locks when both come along.
-- **Court notes** say why when it isn't a plain similar-skill game:
-  - "wider skill range for new partners"
-  - "wider skill range so nobody goes straight back"
-  - "mixed teams for new partners"
-  - "mixed teams so nobody goes straight back"
-  - "uneven teams so nobody goes straight back"
-  - "mixed teams, no similar group free"
-
-## 6. Keeping waits near 30 minutes
-
-- **The limit:** nobody should wait more than **30 minutes** between games. Waiting counts from when they last finished a game or arrived; sitting out doesn't restart it. Nothing counts before the session's first game starts, so leaving the app open before play begins doesn't make everyone overdue (which used to lock the lineup and stop Shuffle from changing it).
-- **Locked-pair exception:** if no equal-or-higher-rated match passes the queue protections at 20 minutes, locked teammates become eligible independently. A court still has to free up, so 30 minutes is a target, not a guaranteed maximum.
-- **How:** anyone who has waited **20 minutes or more** plays in the next game of their format, up to a full court. If more than a court's worth are overdue, **fewest games first**, then longest wait, until someone reaches 30 minutes. At **30+ minutes**, longest waiting takes priority over game counts so catching others up cannot leave someone waiting indefinitely. A late arrival counts at par here (the games they missed don't put them ahead). It starts at 20, not 30, because a court still has to free up.
-- **Worst case for that game:** the usual skill steps first (within 1 level, then 1.5); if those don't work, balanced teams with all four **within 2 levels**. Only if nobody at all is free within 2 levels does it go wider, so the waiting player still plays.
-- **The rest of the game** is chosen by the normal rules around them. The court names them only once they've waited **25+ minutes**, for example "Next up · Gino waited 25+ min" (at 20 it showed on about half of all games).
-- **If the overdue players can't make even teams together,** as many of them play as even teams allow, longest waiting first; the rest go in the next game. The court note names only the overdue players actually in the game.
-- **In a simulation** (2 courts, 3 hours, 30 nights): with 18 players the longest wait was 27 minutes (38 when this rule started at 40), with no loss of skill match. With 22 players the longest was 31 minutes (51 before), and games within 1 level dropped from 62% to 53%: on a crowded night, keeping waits short costs some skill match.
+- Waits are displayed from the player's last completed game or arrival, never before the first game starts. Sitting out keeps that clock running.
+- **General overdue protection is paused:** there is no 20-minute inclusion priority, 25-minute court note, or 30-minute game-count override. Time does not widen ordinary matching ranges. Longest rested remains the normal tie-break after counted games.
+- The separate **30-minute locked-pair timeout** above remains active. There is no guaranteed maximum wait. Crowded courts, locked pairs, manual lineups and scheduled reservations can all extend waits.
 
 ## 7. Singles matching
 
@@ -138,6 +116,7 @@ Within those steps:
 
 ## 8. Shuffle and replacing a player
 
+- A scheduled locked court must first be postponed or cancelled before its lineup or court can be edited.
 - **Shuffle (🔀)** tries another fair lineup on that court's next game only. Every other court keeps its lineup.
   - While more players haven't played yet than a game needs, each shuffle draws a fresh random group from them.
   - It's hidden on courts that are already playing and in tournament mode.
@@ -210,19 +189,19 @@ Within those steps:
 | Similar skill, doubles | within 1.0 level |
 | Wider range, doubles | within 1.5 levels |
 | Fair teams | team averages within 0.75 |
-| Balanced-only mode | under 6.25 players per court, all courts doubles |
-| Even games | nobody plays again while someone with fewer games waits; gives way to a 6+ point repeat |
+| Roster-size strategy switching | paused; all rosters use the same matching stages |
+| Game-count fairness | equal-count games preferred; no repeat-based exception |
 | Singles opponent range | 1.0 level |
-| Repeat memory | last 3 games per player |
-| Repeat limit | 3 points |
+| Team rotation | partnership recency within the already selected four only |
+| Repeat-based player selection | paused |
 | Standings ranking | at least 75% of the median games played (`rankShare`) |
 | Scheduled match estimate | median of last 10 completed games of the same format; 12-minute fallback (`scheduledDefault`) |
 | Scheduled reservation | one eligible request at a time; no expiry |
 | Scheduled jump priority penalty | +2 counted games, reducing by 1 after each completed ordinary game; repeated jumps reset to 2 |
-| Wait target | 30 minutes; priority from 20 minutes, longest waiting first at 30+, named on court at 25+ |
+| Overdue priority and wait notes | paused; normal wait tie-break retained |
 | Late arrivals | credit only from 30 minutes after the first game; first 4 waiting go first, the rest at par; at most 2 per game |
-| Overdue game, worst case | within 2 levels, balanced teams |
-| Locked teammates | opponents' average at least theirs (within 0.05); locked-game players at most 1 counted game ahead; unmatchable pairs released at 20 minutes, when 2 games behind, or to prevent an otherwise idle automatic court; no teaming until each plays once after 3 consecutive wins together |
+| Recall lead limit | at most one counted game ahead of the least-played eligible waiting player |
+| Locked teammates | opponents 0.50 lower through 1.25 higher, real averages; release after 30 minutes only; three-win cooldown retained |
 | Rating: most one game moves | 0.3 (×1.5 for a new player's first 8 games, ×0.75 for regulars) |
 | Streak boost (matching only) | ±0.5 after 3 wins or losses in a row, ±0.5 more each further one, at most ±1.5 |
 | Hot/cold teaming | partners within 1.0 level, teams within 0.25, all four within 2 levels |
@@ -236,9 +215,12 @@ Within those steps:
 - **Settings → Scheduled Matches** lets the organizer choose exact singles or doubles teams, view requests, or cancel pending ones. Scheduling uses the session length chosen when creating the session (or adjusted in Session Settings); the match form does not ask for or change it. Older sessions without a length must have one set in Session Settings first. These are deliberate manual overrides of rating balance, locked teammates and cooldowns, not automatic team suggestions.
 - Each requested participant must have completed one non-cancelled game in this session. Other players do not need to have played. Absent and sitting-out players cannot be reserved.
 - Requests run in creation order, skipping blocked requests, including requests whose entire lineup is still playing. Only one request holds available participants at a time. They wait until their teammates and a compatible automatic court are free; there is no timeout or retry window. Once a request holds players, a newly unblocked older request cannot take it over. If no ordinary game can otherwise fill an open automatic court, available held players may join one ordinary game per active request; the scheduled request remains active and waits for them to finish. A second release is blocked so filling courts cannot prevent the scheduled group from ever gathering; a brief court wait can be necessary with a small roster. Other players continue ordinary rotation. Manual lineups and games underway are preserved.
-- Exact scheduled teams may break locked partnerships, rating balance, ordinary rest protections and priority penalties. The organizer still presses **Start**; previews and Start use the same lineup and recheck remaining session time.
+- **Locked court assignment:** when all participants are free and eligible, claim the next compatible automatic court and save that assignment. The badge is **Scheduled · Locked**. Existing manual lineups and games underway are preserved; automatic preview lineups may be replaced by the scheduled request. Redraws and court reordering do not move it.
+- While assigned, player replacement, Shuffle, side locking, manual lineup selection, court format changes and court removal are unavailable. Exact teams may override rating balance, normal rest protections, locked partnerships and queue priority. The organizer still presses **Start**, which rechecks availability and remaining time.
+- **Postpone 10 min** and **Cancel Request** appear on the assigned court and in the scheduled list before Start. Postpone releases players and court immediately, keeps the original creation order and retries after ten minutes. It cannot preempt another active reservation. Cancel removes the request. A match underway uses the existing game controls.
+- If a participant becomes unavailable, clear the assigned court and retain the request with a waiting status. New assignment occurs once it is eligible again.
 - **Immediate returners:** track participants playing while their request is active. When its last busy participants finish and everyone becomes available, only that final returning group qualifies; participants who were already free or waited through an earlier return do not. Organizer delay before Start does not change this snapshot. The started match records these players. After a completed scheduled game, they count as **two extra games ahead** in ordinary queue ordering. Their next completed ordinary game reduces this to one, and the following ordinary game removes it. Repeated qualifying scheduled returns reset to two rather than stacking. Actual games played and ratings are unchanged by this penalty; normal wait protections still apply. A penalized player must complete **one ordinary game** before their next scheduled match; a cancellation does not count. After that ordinary game, the remaining +1 penalty still applies to ordinary rotation, while another scheduled match may proceed. Queue rows show the remaining priority cooldown separately.
-- A scheduled match requires enough remaining session time for the median duration of the last ten completed games of that format (**12 minutes** without history). Duration estimates cannot guarantee a finish before closing. Status distinguishes participants needing their first game, waiting for players/court, insufficient time, playing and completed.
+- A scheduled match requires enough remaining session time for the median duration of the last ten completed games of that format (**12 minutes** without history). Duration estimates cannot guarantee a finish before closing. Status distinguishes first-game eligibility, waiting, a locked court, postponement, insufficient time, playing and completion.
 - Completion fulfills a request once. Undo Start or cancelling returns it to pending and applies no penalty. Correcting or deleting results recalculates penalties from completed history. New sessions carry neither requests nor priority penalties. Old milestone and hold/retry fields are ignored. Scheduling updates while the app is active; it does not require background execution.
 
 ### Actual session end date

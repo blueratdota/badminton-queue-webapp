@@ -43,7 +43,7 @@ function QueueSection() {
   return <>
     <Section head={`Queue · ${q.length} off court · ${onCourt().size} playing`}
       foot={(balancedOnly() ? `Balanced teams: fewer than ${Math.ceil(BALANCED_BELOW * S.courts.length)} players for ${plural(S.courts.length, 'doubles court')}, so games mix levels with even teams instead of similar-skill groups. ` : '')
-        + 'Fewest games first, then longest rested. Tap a player to edit; use ⋯ for queue actions.'}>
+        + 'Fewest counted games first, then longest rested. Balanced recalls may be one game ahead. Repeated groups are allowed; overdue priority is paused.'}>
       <AnimatePresence initial={false}>
         {q.map(p => <QueueRow key={p.id} p={p} pos={p.paused ? null : ++n} />)}
       </AnimatePresence>

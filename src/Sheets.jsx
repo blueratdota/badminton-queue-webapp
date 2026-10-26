@@ -5,7 +5,7 @@ import { motion } from 'framer-motion';
 import { Circle, CircleCheck, History, Plus, Trash2, Trophy, UserPlus, Users, CirclePause } from 'lucide-react';
 import { cn } from 'cn';
 import {
-  scheduleMatch, scheduledStatus, scheduledDone, scheduledPlaying, cancelScheduled, endLabel, getS, SKILL, PREFS, P, level, r1, avg, names, played, wins, score, isDupName, addPlayer, arrive, replacements, replace, courtById, clone,
+  postponeScheduled, scheduleMatch, scheduledStatus, scheduledDone, scheduledPlaying, cancelScheduled, endLabel, getS, SKILL, PREFS, P, level, r1, avg, names, played, wins, score, isDupName, addPlayer, arrive, replacements, replace, courtById, clone,
   deleteResult, past, returningPlayers, registry, queue, setLock, splitDue, rankingMinimum, places,
   tournamentEntrants, buildTournament, withMatching,
 } from './engine';
@@ -401,7 +401,7 @@ function Pairing() {
   const pairs = S.players.filter(p => mutual(p) && p.id < p.lock).map(p => [p, P(p.lock)]);
   return (
     <Sheet title="Locked Teammates" left={null} right={{ label: 'Done', run: closeModal }}>
-      <Section foot="Locked teammates play against an equal or higher-rated team (within 0.05), with normal rest and game-count protections. If no suitable game is available after 20 minutes, or they fall two games behind, they play separately to catch up. After three wins together, each plays one game with a different teammate; they do not have to face each other.">
+      <Section foot="Locked teams face real-average opponents from 0.50 lower through 1.25 higher. Unmatchable pairs wait 30 minutes before playing separately, even if a court is idle. After three wins together, each plays once with a different teammate; they need not face each other.">
         {pairs.map(([x, y]) => (
           <div key={x.id} className={cn(row, 'flex items-center justify-between gap-3 py-1.5')}>
             <Who name={`${x.name} & ${y.name}`} sub={splitDue(x.id, y.id) ? 'Cooldown · different teammates' : 'Locked together'} />
@@ -472,7 +472,7 @@ function ScheduledMatches() {
     <Section foot="A match must have time to finish before the session ends. Typical duration uses the last ten completed games (12 minutes without history).">
       {(S.scheduled||[]).map(r=><div key={r.id} className={cn(row,'grid gap-2')}>
         <b>{names(r.a)} vs {names(r.b)}</b><small>{cap(r.format)} · {scheduledStatus(r)}</small>
-        {!scheduledDone(r)&&!scheduledPlaying(r)&&<button className="text-left text-destructive" onClick={()=>{cancelScheduled(r.id);save();}}>Cancel Request</button>}
+        {!scheduledDone(r)&&!scheduledPlaying(r)&&<><button className="text-left" onClick={()=>act(()=>postponeScheduled(r.id))}>Postpone 10 min</button><button className="text-left text-destructive" onClick={()=>{cancelScheduled(r.id);save();}}>Cancel Request</button></>}
       </div>)}
       {!S.scheduled?.length&&<div className={cn(row,'text-muted-foreground')}>No scheduled matches.</div>}
       <button className={btnRow} disabled={!!S.tournament||S.ended!=null} onClick={()=>{setSlots(['','','','']);setFormat('doubles');setAdding(true);}}>Schedule a Match</button>

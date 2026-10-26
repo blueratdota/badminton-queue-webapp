@@ -54,8 +54,7 @@ try {
   round(s);request();assert(!p.nextSession(true).scheduled);
   s=fixture(4);s.courts=s.courts.slice(0,1);p.setLock('p0','p1');
   assert.equal(p.pick('doubles',p.queue()),null,'generic projections retain locks');
-  game=p.queueUpNext()[0];assert(game?.note.includes('avoid an idle court'));
-  assert.notEqual(game.a.some(x=>x.id==='p0'),game.a.some(x=>x.id==='p1'),'open court splits instead of using weaker opponents');
+  game=p.queueUpNext()[0];assert.equal(game,undefined,'locked pairs wait instead of splitting for an idle court');
   s=fixture(6);s.courts=s.courts.slice(0,1);p.setLock('p0','p1');game=p.queueUpNext()[0];
   assert(![...game.a,...game.b].some(x=>['p0','p1'].includes(x.id)),'other legal players go first while locked pair waits');
   s=fixture(4);s.courts=s.courts.slice(0,1);s.players.forEach((x,i)=>x.skill=[5,1,4,2][i]);p.setLock('p0','p1');
@@ -83,7 +82,7 @@ try {
   s=fixture(12);round(s);s.players[0].away=true;const older=request();const stable=request(['p4','p5'],['p6','p7']);
   assert.equal(p.scheduledReservation().id,stable);s.players[0].away=false;p.refreshSchedule();assert.equal(p.scheduledReservation().id,stable,'older requests cannot preempt an active hold');
   p.cancelScheduled(stable);assert.equal(p.scheduledReservation().id,older);
-  s=fixture();round(s);p.setLock('p1','p4');s.courts[0].match={a:['p0','p4'],b:['p5','p6'],start:now};request();
+  s=fixture();round(s);s.courts[0].match={a:['p0','p4'],b:['p5','p6'],start:now};request();
   game=p.queueUpNext().find(g=>g.court===s.courts[1].id);assert(game&&!game.scheduled&&game.note.includes('hold relaxed'));
   p.fill(game.court,game);assert(s.courts[1].match,'idle-court fallback preview can Start');
   assert.equal(new Set(s.courts.flatMap(c=>[...c.match.a,...c.match.b])).size,8);

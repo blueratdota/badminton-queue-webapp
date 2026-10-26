@@ -4,14 +4,14 @@ import { rallySeed, rallyUnit } from './rally';
 import { motion, AnimatePresence } from 'framer-motion';
 import { UserRound, UsersRound, Ellipsis, Lock, LockOpen, Shuffle, Trash2, Undo2 } from 'lucide-react';
 import { cn } from 'cn';
-import { getS, NEED, players, eligible, names, champion, fill, finish, shuffleCourt, lockSide, courtById, streakBoost } from './engine';
+import { scheduledOnCourt, postponeScheduled, cancelScheduled, getS, NEED, players, eligible, names, champion, fill, finish, shuffleCourt, lockSide, courtById, streakBoost } from './engine';
 import { act, save, openModal, confirm } from './store';
 import { cap, Dots, Seg } from './bits';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 
 export function CourtCard({ c, next }) {
-  const S = getS(), t = S.tournament, m = c.match;
+  const S = getS(), t = S.tournament, m = c.match, scheduled=scheduledOnCourt(c.id);
   const format = t ? t.format : c.format, singles = format === 'singles';
   const labelId = m?.tm ?? next?.match;
   const gameLabel = t && labelId != null ? t.matches[labelId].label : null;
@@ -50,9 +50,9 @@ export function CourtCard({ c, next }) {
     >
       <div className="flex min-w-0 flex-wrap items-center gap-2 px-4">
         <h2 className="max-w-[45%] flex-none truncate text-xl font-bold">{c.name}</h2>
-        <span className={cn("court-status", m ? "playing" : next ? "ready" : "waiting")}>{m ? "Playing" : S.ended!=null ? "Ended" : next?.scheduled ? "Scheduled" : next ? "Ready" : "Waiting"}</span><span className="flex-1" />
+        <span className={cn("court-status", m ? "playing" : next ? "ready" : "waiting")}>{m ? "Playing" : S.ended!=null ? "Ended" : next?.scheduled ? "Scheduled · Locked" : next ? "Ready" : "Waiting"}</span><span className="flex-1" />
         {t ? <span className="text-[13px] font-semibold text-muted-foreground">{cap(format)}</span>
-          : <Seg small label={`${c.name} format`} value={c.format} disabled={!!m} className="max-w-[100px] min-w-0 flex-[0_1_100px]"
+          : <Seg small label={`${c.name} format`} value={c.format} disabled={!!m||!!scheduled} className="max-w-[100px] min-w-0 flex-[0_1_100px]"
               options={['singles', 'doubles'].map(f => ({ value: f, label: <>{f === 'singles' ? <UserRound className="size-4" /> : <UsersRound className="size-4" />}<span className="sr-only">{cap(f)}</span></> }))}
               onChange={f => act(() => { const x = courtById(c.id); x.format = f; x.plan = null; })} />}
         <DropdownMenu>
@@ -60,8 +60,9 @@ export function CourtCard({ c, next }) {
             <Button variant="ghost" size="icon-pill" className="-mr-2 text-ink" aria-label={`${c.name} options`}><Ellipsis /></Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            {scheduled&&<><DropdownMenuItem onSelect={()=>act(()=>postponeScheduled(scheduled.id))}>Postpone 10 min</DropdownMenuItem><DropdownMenuItem variant="destructive" onSelect={()=>act(()=>cancelScheduled(scheduled.id))}>Cancel Request</DropdownMenuItem></>}
             {m && <DropdownMenuItem onSelect={() => act(() => { courtById(c.id).match = null; })}><Undo2 />Undo Start</DropdownMenuItem>}
-            <DropdownMenuItem variant="destructive" disabled={!!m} onSelect={() => act(() => { S.courts = S.courts.filter(x => x.id !== c.id); })}><Trash2 />Remove {c.name}</DropdownMenuItem>
+            <DropdownMenuItem variant="destructive" disabled={!!m||!!scheduled} onSelect={() => act(() => { S.courts = S.courts.filter(x => x.id !== c.id); })}><Trash2 />Remove {c.name}</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

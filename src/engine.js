@@ -30,7 +30,7 @@ export const LATE_AFTER = 30 * 60000; // arrivals in the first 30 minutes after 
 // 19 for 3, 25 for 4); fewer, balanced teams. EVEN_REPEAT: an even-games pick that repeats this much (all four met lately) gives way.
 export const BALANCED_BELOW = 6.25, EVEN_REPEAT = 6;
 export const LOCK_GAME_LEAD = 1;
-export const LOCK_EQUAL = 0.05; // locked teammates: opponents' average at least the pair's (within display rounding)
+export const LOCK_EQUAL = 0.5; // locked teammates: opponents' average at least the pair's (within display rounding)
 export const LS_KEY = 'shuttle-queue-v2';
 export const THEME_KEY = 'shuttle-queue-theme'; // per-viewer: system, light or dark
 
@@ -61,7 +61,7 @@ export const waitStart = p => Math.max(p.since ?? p.readyAt, startedAt() ?? Date
 export function waitedLabel(p) {
   if (S.ended != null || startedAt() == null) return '';
   const mins = Math.floor((Date.now() - waitStart(p)) / 60000);
-  return ` · <span class="${mins * 60000 >= WAIT_PRIORITY ? 'warnc' : ''}">${mins} min</span>`;
+  return ` · <span class="">${mins} min</span>`;
 }
 export const endsAt = (x = S) => x.hours && startedAt(x) != null ? startedAt(x) + x.hours * 3600000 : null;
 /** "2 h · until 9:30 PM · 1 hr, 20 min left", or "2 h · not started"; '' without a planned length. */
@@ -209,14 +209,12 @@ export function bestFour(q, pool, recent, justOff, { bySpread = false, must = 1,
     const fair = fairSplits(four).filter(s => (!together || [s.a, s.b].some(t => teamHas(t, together)))
       && (!lk.length || keepsLocks(idsOf(s.a), idsOf(s.b), lk, lockCtx.strict, lockCtx.protection)));
     if (!fair.length) continue;
-    const splits = fair.map((sp, o) => ({ sp, pen: repeats(sp.a, sp.b, recent), o })).sort((x, y) => cmp([x.pen, x.o], [y.pen, y.o]));
-    const sk = four.map(p => p.skill), range = Math.max(...sk) - Math.min(...sk);
-    // Fewest games among the other three before fewest repeats, so players at either end of the ratings aren't left behind.
-    // bySpread (balanced teams): repeats past the limit, then nearest ratings in quarter levels, come before that.
-    const key = [four.filter(p => justOff.has(p.id)).length, ...(bySpread || heavyFirst ? [splits[0].pen >= REPEAT_LIMIT ? splits[0].pen : 0] : []), ...(bySpread ? [Math.round(range * 4)] : []),
-      picked.reduce((a, i) => a + (games[q[i].id] || 0), 0),
-      splits[0].pen, ...(bySpread ? [Math.round(range * 100)] : []), pool[k], picked.reduce((a, b) => a + b, 0)];
-    if (!best || cmp(key, best.key) < 0) best = { key, pen: splits[0].pen, splits: splits.map(x => x.sp) };
+    const low=Math.min(...q.map(p=>games[p.id]||0));
+    if(four.some(p=>justOff.has(p.id)&&(games[p.id]||0)>low+1)) continue;
+    const splits=fair.map((sp,o)=>({sp,o})).sort((x,y)=>Math.abs(sum(x.sp.a)-sum(x.sp.b))-Math.abs(sum(y.sp.a)-sum(y.sp.b))||x.o-y.o);
+    const sk=four.map(p=>p.skill),range=Math.max(...sk)-Math.min(...sk);
+    const key=[four.filter(p=>justOff.has(p.id)).length,...(bySpread?[Math.round(range*4)]:[]),picked.reduce((a,i)=>a+(games[q[i].id]||0),0),...(bySpread?[Math.round(range*100)]:[]),pool[k],picked.reduce((a,b)=>a+b,0)];
+    if (!best || cmp(key, best.key) < 0) best = { key, pen: 0, splits: splits.map(x => x.sp) };
   }
   return best && { splits: best.splits, penalty: best.pen, justOff: best.key[0] };
 }
@@ -228,9 +226,9 @@ export function pickDoubles(q, choice = 0, { recent = {}, must = 1, justOff = ne
   if (q.length < 4) return null;
   const head = q[0];
   // How far a pick falls short: players straight off court first (rest beats skill match), then repeats past the limit.
-  const shortfall = g => g ? [g.justOff, g.penalty >= REPEAT_LIMIT ? g.penalty : 0] : [Infinity, Infinity];
+  const shortfall = g => g ? [g.justOff, 0] : [Infinity, Infinity];
   const fine = g => cmp(shortfall(g), [0, 0]) === 0;
-  const reason = (from, to) => (from?.justOff ?? 0) > to.justOff ? (to.justOff ? 'so fewer go straight back' : 'so nobody goes straight back') : 'for new partners';
+  const reason = (from, to) => (from?.justOff ?? 0) > to.justOff ? (to.justOff ? 'so fewer go straight back' : 'so nobody goes straight back') : 'for balanced teams';
   const similarGroup = spread => {
     const near = [...new Set([...Array.from({ length: must - 1 }, (_, i) => i + 1),
       ...q.map((_, i) => i).slice(1).filter(i => Math.abs(q[i].skill - head.skill) <= spread + 1e-9).slice(0, 12)])].sort((a, b) => a - b);
@@ -251,17 +249,20 @@ export function pickDoubles(q, choice = 0, { recent = {}, must = 1, justOff = ne
     if (b && cmp(shortfall(b), shortfall(best)) < 0) { note = balancedOnly ? null : best ? 'mixed teams ' + reason(best, b) : 'mixed teams, no similar group free'; best = b; }
   }
   if (!best && together) return null;
-  // Nobody straight back while four rested players can play: the evenest four of them, uneven teams if it must be.
-  const fallback = best ? [] : fairFour(q, must);
-  if (!together && (best ? best.justOff : fallback.filter(p => justOff.has(p.id)).length) > 0) {
-    const four = restedFour(q, must, justOff);
-    if (four && lastResortSplits(four).length) { const t = lastResortSplits(four)[0]; return { format: 'doubles', a: t.a, b: t.b, options: 1, note: 'uneven teams so nobody goes straight back' }; }
+  let splits=best?.splits;
+  if(!splits){
+    const low=Math.min(...q.map(p=>games[p.id]||0)),pool=q.slice(0,12);
+    outer: for(let k=3;k<pool.length;k++)for(let j=2;j<k;j++)for(let i=1;i<j;i++){
+      const four=[pool[0],pool[i],pool[j],pool[k]];
+      if(!accept(four)||four.some(p=>justOff.has(p.id)&&(games[p.id]||0)>low+1))continue;
+      const legal=lastResortSplits(four);if(legal.length){splits=legal;break outer;}
+    }
+    note='fairest available teams';
   }
-  const splits = best ? best.splits : lastResortSplits(fallback);
-  if (!splits.length) return null;
-  if (!best) note = lockCtx && Math.abs(sum(splits[0].a)-sum(splits[0].b))/2>FAIR ? 'uneven teams to keep released teammates apart' : 'mixed teams, no similar group free';
-  const s = splits[choice % splits.length];
-  return { format: 'doubles', a: s.a, b: s.b, options: splits.length, note };
+  if(!splits?.length)return null;
+  const team=splits[choice%splits.length];
+  return {format:'doubles',a:team.a,b:team.b,options:splits.length,note};
+
 }
 /** The first in line (if rested) plus the three rested players, of the first 12, who make the evenest teams, however uneven;
     anyone overdue (the first `must`) included. null if fewer than four are rested. */
@@ -292,7 +293,7 @@ export function lastResortSplits(four) {
 export const lastOffCourt = () => { const r = counted().at(-1); return new Set(r ? [...r.a, ...r.b] : []); };
 export const activePlayers = () => S.players.filter(p => !p.paused && !p.away).length; // sitting out and not here don't count
 /** All courts doubles and fewer than 6.25 players per court here: balanced teams instead of similar-skill groups. */
-export const balancedOnly = () => S.courts.length > 0 && S.courts.every(c => c.format === 'doubles') && activePlayers() < BALANCED_BELOW * S.courts.length;
+export const balancedOnly = () => false;
 /** Hot/cold teaming: when someone on a win streak (or losing streak) is about to play and someone on the opposite streak within
     1.0 level is resting near the front (first 8, then 12), they're teammates, against even opponents (teams within 0.25, all four
     within 2 levels). The first in line still plays and nobody is called straight back. No court note. */
@@ -360,7 +361,7 @@ export function keepsLocks(a, b, locks, strict, protection = null) {
     if (l.apart && (inA === 2 || inB === 2)) return false;
     if (!l.apart) { const [own, opp] = inA ? [a,b] : [b,a];
       if (protection && ![...own,...opp].every(id => protection.opponents.has(id))) return false;
-      if (strict && realAvg(opp) < realAvg(own) - LOCK_EQUAL) return false; }
+      if (strict && (realAvg(opp) < realAvg(own)-LOCK_LOWER-1e-9 || realAvg(opp)>realAvg(own)+LOCK_HIGHER+1e-9)) return false; }
   }
   return true;
 }
@@ -385,30 +386,24 @@ export function streakBoost(id) {
 export const newcomer = p => !!p.credit && played(p.id) === 0;
 /** Keep locked teams only while normal rest, game-count and opponent-rating rules allow it. */
 export function pick(f, line, choice = 0, allowIdleRelease = false) {
-  const normal=pickAvailable(f,line,choice,allowIdleRelease);
-  if (normal || !allowIdleRelease || !line.some(p=>isLocked(p)&&onCourt().has(p.lock))) return normal;
-  const released=pickAvailable(f,line,choice,true,false);
-  if (released) released.note=[released.note,'busy locked teammate released to avoid an idle court'].filter(Boolean).join(' · ');
-  return released;
+  return pickAvailable(f,line,choice);
 }
 export function lockProtection(line) {
   const n = gamesCounted(), low = Math.min(...line.map(p => n[p.id])), off = lastOffCourt();
   const rested = new Set(line.filter(p => !off.has(p.id)).map(p => p.id));
-  return { opponents: new Set(line.filter(p => n[p.id] <= low + LOCK_GAME_LEAD).map(p => p.id)), rested: rested.size >= 4 ? rested : null };
+  return { opponents: new Set(line.filter(p => n[p.id] <= low + LOCK_GAME_LEAD).map(p => p.id)), rested: null };
 }
 /** Equal-or-higher opponents from the full queue, preserving rest and games-played protections. */
 export function lockedGame(order, l, locks) {
   if (l.apart) return null;
   const x = P(l.x), y = P(l.y), others = order.filter(p => p.id !== l.x && p.id !== l.y);
   const counts = gamesCounted(), protection = lockProtection(order), recent = recentPairs();
-  const oldest = order.filter(p=>Date.now()-waitStart(p)>=WAIT_CAP).sort((a,b)=>waitStart(a)-waitStart(b))[0];
   let best = null;
   for (let j = 1; j < others.length; j++) for (let i = 0; i < j; i++) {
     const a = [x, y], b = [others[i], others[j]];
-    if (oldest && ![...a,...b].some(p=>p.id===oldest.id)) continue;
     if (!keepsLocks(a.map(p => p.id), b.map(p => p.id), locks, true, protection)) continue;
     const gap = Math.abs(realAvg(a.map(p => p.id)) - realAvg(b.map(p => p.id)));
-    const key = [b.reduce((n,p) => n + counts[p.id], 0), repeats(a,b,recent), Math.round(gap * 100), i + j];
+    const key = [b.reduce((n,p) => n + counts[p.id], 0), Math.round(gap * 100), i + j];
     if (!best || cmp(key,best.key) < 0) best = {key,b};
   }
   return best && lockNotes({format:'doubles', a:[x,y], b:best.b, options:1, note:null},locks);
@@ -418,8 +413,7 @@ export function lockNotes(p, locks) {
   const notes = locks.filter(l => l.apart && (ids.has(l.x) || ids.has(l.y))).map(l => {
     const names=`${P(l.x).name} & ${P(l.y).name}`;
     if(splitDue(l.x,l.y)) return names+' cooldown after 3 wins together';
-    if(l.idle) return names+' released to avoid an idle court';
-    return names+([P(l.x),P(l.y)].some(p=>Date.now()-waitStart(p)>=WAIT_PRIORITY) ? ` released after ${WAIT_PRIORITY/60000}-minute wait` : ' released to catch up on games');
+    return names+' released after 30-minute wait';
   });
   if (notes.length) p.note = [p.note,...notes].filter(Boolean).join(' · ');
   return p;
@@ -428,18 +422,7 @@ export function pickCore(f, line, choice = 0) {
   // Streaks: matched at the boosted rating; the players handed back carry their real ratings.
   line = line.map(p => { const b = streakBoost(p.id); return b ? { ...p, skill: p.skill + b } : p; });
   // Wait clocks run from the session's first game: time before play starts doesn't make anyone overdue.
-  const now = Date.now(), waited = waitStart;
-  const n = gamesCounted();
-  const hard = p => now-waited(p)>=WAIT_CAP;
-  let overdue = line.filter(p => now - waited(p) >= WAIT_PRIORITY).sort((x,y) => Number(!hard(x))-Number(!hard(y)) || (hard(x) && hard(y) ? waited(x)-waited(y) : 0) || n[x.id]-n[y.id] || waited(x)-waited(y));
-  // A together-locked pair is overdue together; cooldown partners are overdue independently.
-  if (lockCtx) { const units = []; let pair = false;
-    for (const p of overdue) { if (units.includes(p)) continue;
-      const l = lockCtx.locks.find(l => l.x === p.id || l.y === p.id), mate = l && line.find(x => x.id === (l.x === p.id ? l.y : l.x));
-      if (mate && l && !l.apart) { if (!pair && units.length + 2 <= NEED[f]) { units.push(p, mate); pair = true; } }
-      else if (units.length < NEED[f]) units.push(p); }
-    overdue = units; }
-  overdue = overdue.slice(0, NEED[f]);
+  const now = Date.now(), waited = waitStart, n=gamesCounted(), overdue=[];
   const late = new Set(overdue.map(p => p.id));
   const q = line.filter(p => !late.has(p.id));
   const unplayed = q.filter(p => played(p.id) === 0);
@@ -470,18 +453,15 @@ export function pickCore(f, line, choice = 0) {
     return !rest.length || four.every(p => (n[p.id] || 0) <= Math.min(...rest.map(x => n[x.id] || 0))); };
   if (opts) opts.accept = four => (!fewNew || fewNew(four)) && even(four);
   let p = f === 'singles' ? pickSingles(pool, S.results.map(r => r.end), turn) : pickDoubles(pool, turn, opts);
-  // ...unless that brings back a foursome that all met lately: then the usual pick, if it repeats less.
-  if (p && opts && repeats(p.a, p.b, opts.recent) >= EVEN_REPEAT) {
-    const u = pickDoubles(pool, turn, { ...opts, accept: fewNew });
-    if (u && repeats(u.a, u.b, opts.recent) < repeats(p.a, p.b, opts.recent)) p = u;
-  }
-  if (!p && opts?.accept) { delete opts.accept; p = pickDoubles(pool, turn, opts); }
+  if ((!p || Math.abs(sum(p.a)-sum(p.b))/2>FAIR) && opts?.accept) { delete opts.accept; p = pickDoubles(pool, turn, opts) || p; }
+  let forcedHotCold=false;
   // Hot/cold teaming: offered first; shuffle then steps through the normal games.
   if (f === 'doubles') {
     const normal = turn === 0 ? p : pickDoubles(pool, 0, opts);
     const hc = hotColdGame(pool, [...(normal ? [...normal.a, ...normal.b] : []), ...pool.slice(0, 4)], overdue, off);
-    if (hc) { const n = 1 + (normal?.options || 0), k = turn % n; p = k === 0 ? hc : pickDoubles(pool, k - 1, opts); if (p) p.options = n; }
+    if (hc) { const n = 1 + (normal?.options || 0), k = turn % n; forcedHotCold=k===0; p = k === 0 ? hc : pickDoubles(pool, k - 1, opts); if (p) p.options = n; }
   }
+  if(p && f==='doubles' && !forcedHotCold)p=rotateTeams(p,turn);
   if (p && fresh) p.options = 99; // keeps the shuffle button available
   // The note names only the overdue players actually in this game.
   const inGame = p ? overdue.filter(o => now - waited(o) >= NOTE_AFTER && [...p.a, ...p.b].some(x => x.id === o.id)) : [];
@@ -497,11 +477,13 @@ export function manualSlots(c) {
 }
 /** Manual mode on (empty slots: the organiser picks every player) or off (back to automatic picks). */
 export function setManual(id, on) {
+  if(scheduledOnCourt(id))return;
   const c = courtById(id); if (!c || c.match) return;
   c.manual = on ? Array(NEED[c.format]).fill(null) : null; c.plan = null; c.locked = null; c.shuffles = 0;
 }
 /** Puts a player in a manual slot (null empties it); they leave any other manual slot they were in. */
 export function setSlot(id, k, pid) {
+  if(scheduledOnCourt(id)||scheduledLockedPlayers().has(pid))return;
   const c = courtById(id); if (!c || !manualSlots(c)) return;
   if (pid) for (const o of S.courts) if (o.manual) o.manual = o.manual.map(x => x === pid ? null : x);
   const m = manualSlots(c); if (k < 0 || k >= m.length) return;
@@ -527,7 +509,7 @@ export function queueUpNext() {
   const reserved = new Set(reservation ? [...reservation.a,...reservation.b] : []);
   let borrowed = !!reservation?.idleReleased;
   const free = onCourt();
-  const scheduledCourt = reservation && ![...reserved].some(id=>free.has(id)||taken.has(id)) ? open.find(c=>c.format===reservation.format&&!c.manual&&!validPlan(c)) : null;
+  const scheduledCourt = reservation && ![...reserved].some(id=>free.has(id)||taken.has(id)) ? open.find(c=>c.format===reservation.format&&!c.manual&&!validPlan(c)&&(!reservation.assignedCourt||c.id===reservation.assignedCourt)) : null;
   reserved.forEach(id=>taken.add(id));
   const out = [];
   for (const c of open) {
@@ -571,17 +553,18 @@ export function nextPairing(c) {
 export const shuffleOptions = c => (!S.tournament && !c.match) ? (nextPairing(c)?.options || 0) : 0;
 /** Shuffle one court's Next up game; every other court keeps its lineup. */
 export function shuffleCourt(id) {
+  if(scheduledOnCourt(id))return;
   const c = courtById(id); if (!c || c.match || c.manual) return;
   // One run of the matching for every court, read before any plan below changes it; skipped when nothing else needs keeping.
   const needed = c.locked != null || S.courts.some(o => o.id !== id && !o.match);
   const [keep, here] = !needed ? [[], null] : withMatching(() => [
-    S.courts.filter(o => o.id !== id && !o.manual).map(o => [o, nextPairing(o)]).filter(([, p]) => p).map(([o, p]) => [o, { a: p.a.map(x => x.id), b: p.b.map(x => x.id) }]),
+    S.courts.filter(o => o.id !== id && !o.manual).map(o => [o, nextPairing(o)]).filter(([, p]) => p&&!p.scheduled).map(([o, p]) => [o, { a: p.a.map(x => x.id), b: p.b.map(x => x.id) }]),
     c.locked != null && nextPairing(c)]);
   keep.forEach(([o, pl]) => { o.plan = pl; });
   if (here) {
     // Locked side stays; the other side steps through fair options from the front of the line, rested players first.
     const side = c.locked, kept = (side === 0 ? here.a : here.b).map(p => p.id), current = new Set((side === 0 ? here.b : here.a).map(p => p.id));
-    const busy = new Set([...kept, ...keep.flatMap(([, pl]) => [...pl.a, ...pl.b])]), off = lastOffCourt();
+    const busy = new Set([...kept, ...scheduledLockedPlayers(), ...keep.flatMap(([, pl]) => [...pl.a, ...pl.b])]), off = lastOffCourt();
     const pool = eligible(c.format).filter(p => !busy.has(p.id)).slice(0, 8).map(p => p.id); // ponytail: front 8 only, like the iPad app
     const sides = kept.length === 1 ? pool.map(x => [x]) : pool.flatMap((x, i) => pool.slice(i + 1).map(y => [x, y]));
     const fair = sides.filter(sd => isEven(kept, sd));
@@ -597,6 +580,7 @@ export function shuffleCourt(id) {
 }
 /** Locks one side of an open court's Next up game (null unlocks): those players stay, and shuffle changes only the other side. */
 export function lockSide(id, side) {
+  if(scheduledOnCourt(id))return;
   const c = courtById(id); if (!c || c.match || c.manual) return;
   if (side != null) { const h = nextPairing(c); if (h) c.plan = { a: h.a.map(x => x.id), b: h.b.map(x => x.id) }; }
   c.locked = side;
@@ -632,6 +616,7 @@ export const scheduledPlaying = r => S.courts.some(c => c.match?.scheduled === r
 export function scheduleBlock(r) {
   if (S.ended != null) return 'Session ended';
   if (S.tournament) return 'Waiting for queue mode';
+  if(r.postponedUntil>Date.now())return `Postponed · ${Math.ceil((r.postponedUntil-Date.now())/60000)} min`;
   if ([...r.a,...r.b].some(id=>played(id)===0)) return 'Waiting for participants’ first game';
   if (!endsAt() || Date.now()+scheduledDuration(r.format)>endsAt()) return 'Insufficient time';
   const ids = [...r.a,...r.b];
@@ -644,21 +629,27 @@ export function scheduleBlock(r) {
 }
 export function refreshSchedule() {
   const requests=S.scheduled||[];
-  for (const r of requests) { delete r.heldAt; delete r.retryAt; }
+  for (const r of requests) {
+    delete r.heldAt; delete r.retryAt;
+    const c=courtById(r.assignedCourt);
+    if(scheduledDone(r)||scheduledPlaying(r)||scheduleBlock(r)||[...r.a,...r.b].some(id=>onCourt().has(id))||!c||c.match||c.format!==r.format||c.manual||validPlan(c))delete r.assignedCourt;
+  }
   const r=scheduledReservation();
   if (S.scheduledActive !== (r?.id||null)) {
     S.scheduledActive=r?.id||null;
     if (r) { r.activatedAt=Date.now();r.returning=[];r.idleReleased=false;delete r.readyJumpers; }
   }
   if (!r) return;
+  for(const other of requests)if(other.id!==r.id)delete other.assignedCourt;
   const ids=[...r.a,...r.b],busy=ids.filter(id=>onCourt().has(id));
   r.returning=[...new Set([...(r.returning||[]),...busy])];
-  if (busy.length) { delete r.readyJumpers; return; }
+  if (busy.length) { delete r.readyJumpers; delete r.assignedCourt; return; }
   if (r.readyJumpers==null) {
     const returns=(r.returning||[]).map(id=>({id,end:counted().filter(g=>[...g.a,...g.b].includes(id)).at(-1)?.end})).filter(x=>x.end>=r.activatedAt);
     const last=Math.max(-Infinity,...returns.map(x=>x.end));
     r.readyJumpers=returns.filter(x=>x.end===last).map(x=>x.id);
   }
+  r.assignedCourt ??= S.courts.find(c=>!c.match&&c.format===r.format&&!c.manual&&!validPlan(c))?.id;
 }
 export function scheduledReservation() {
   const eligible=r=>!scheduledDone(r)&&!scheduledPlaying(r)&&!scheduleBlock(r);
@@ -671,7 +662,7 @@ export function scheduledStatus(r) {
   const blocked = scheduleBlock(r); if (blocked) return blocked;
   const busy=onCourt();
   if ([...r.a,...r.b].some(id=>busy.has(id))) return 'Waiting for players';
-  return scheduledReservation()?.id===r.id && S.courts.some(c=>!c.match&&c.format===r.format&&!c.manual&&!validPlan(c)) ? 'Ready' : 'Waiting for court';
+  return scheduledReservation()?.id===r.id && r.assignedCourt && scheduledOnCourt(r.assignedCourt) ? 'Scheduled · Locked' : 'Waiting for court';
 }
 export function cancelScheduled(id) { if (S.courts.some(c=>c.match?.scheduled===id)) throw new Error('Finish or cancel the game on its court first.'); S.scheduled=(S.scheduled||[]).filter(r=>r.id!==id); refreshSchedule(); }
 
@@ -685,6 +676,7 @@ export function fill(cid, shown) {
   const free = new Set(queue().map(p => p.id));
   const p = shown && [...shown.a, ...shown.b].every(x => free.has(x.id)) ? shown : nextPairing(c);
   if (!p) return;
+  if(scheduledOnCourt(cid)&&scheduledOnCourt(cid).id!==p.scheduled)return;
   const current = p.scheduled && queueUpNext().find(g=>g.court===cid&&g.scheduled===p.scheduled);
   if (p.scheduled && (!current || current.a.map(x=>x.id).join()!==p.a.map(x=>x.id).join() || current.b.map(x=>x.id).join()!==p.b.map(x=>x.id).join())) return;
   const held=scheduledReservation();
@@ -812,9 +804,10 @@ export function replacements(out, cid) {
   const inGame = new Set([...here.a, ...here.b].map(p => p.id));
   const lined = {};
   for (const o of S.courts) { if (o.id === cid) continue; const np = nextPairing(o); if (np) [...np.a, ...np.b].forEach(p => lined[p.id] = o.name); }
-  return eligible(c.format).filter(p => !inGame.has(p.id)).map(p => { const l = swapped(here, out, p.id); return { player: p, even: isEven(l.a, l.b), from: lined[p.id] || null }; });
+  return eligible(c.format).filter(p => !inGame.has(p.id)&&!scheduledLockedPlayers().has(p.id)).map(p => { const l = swapped(here, out, p.id); return { player: p, even: isEven(l.a, l.b), from: lined[p.id] || null }; });
 }
 export function replace(out, inc, cid) {
+  if(scheduledOnCourt(cid)||scheduledLockedPlayers().has(inc))return;
   const c = courtById(cid); const here = c && nextPairing(c); if (!here) return null;
   let other = null, ol = null;
   for (const o of S.courts) { if (o.id === cid) continue; const np = nextPairing(o); if (np && [...np.a, ...np.b].some(p => p.id === inc)) { other = o; ol = np; break; } }
@@ -989,14 +982,14 @@ export function selfCheck() {
   const lastGame = (a, b) => { const r = {}; for (const [mine, theirs] of [[a, b], [b, a]]) for (const i of mine)
     r[eight[i].id] = { partners: new Set(mine.filter(x => x !== i).map(x => eight[x].id)), opponents: new Set(theirs.map(x => eight[x].id)) }; return r; };
   const again = pickDoubles(eight, 0, { recent: lastGame([0, 3], [1, 2]) });
-  console.assert(repeats(again.a, again.b, lastGame([0, 3], [1, 2])) === 0 && again.note == null, 'avoid repeating last game');
+  console.assert([...again.a,...again.b].every(p=>eight.slice(0,4).includes(p)), 'repeats do not change who gets the turn');
   const firstTry = pickDoubles(eight);
   // Too few players for similar groups (under 6.25 per doubles court): balanced teams in queue order instead.
   const lineup = extra => ({ players: [5.0, 2.6, 4.6, 3.0, 5.0, 4.8, 4.9, 2.8, ...Array(extra).fill(3)].map((sk, i) => ({ ...pl(sk, i), name: String(i), readyAt: Date.now() - 60000 + i })),
     courts: [court('C1', 'doubles'), court('C2', 'doubles')], results: [], tournament: null });
   const names4 = g => [...g.a, ...g.b].map(p => p.name).sort().join();
   S = lineup(0);
-  console.assert(balancedOnly() && names4(pick('doubles', queue())) === '0,1,2,3', 'too few players: the first in line with the next who make even teams');
+  console.assert(!balancedOnly() && Math.abs(sum(pick('doubles',queue()).a)-sum(pick('doubles',queue()).b))/2<=FAIR, 'small rosters keep the same matching strategy');
   S = lineup(8);
   console.assert(!balancedOnly() && names4(pick('doubles', queue())) === '0,2,4,5', 'enough players: similar-skill groups');
   S = { players: [], courts: [], results: [], tournament: null };
@@ -1014,8 +1007,7 @@ export function selfCheck() {
     courts: [], results: [], tournament: null };
   for (let i = 0; i < 4; i++) { S.players[i].since = Date.now() - 50 * 60000; S.results.push({ winner: 0, a: [S.players[i].id], b: ['x'], start: Date.now() - 3600000 }); }
   const odGame = pick('doubles', queue()), odNames = [...odGame.a, ...odGame.b].map(p => p.name);
-  console.assert(['A', 'B', 'C'].every(n => odNames.includes(n)) && !odNames.includes('D') && !/\bD\b/.test(odGame.note || '')
-    && Math.abs(sum(odGame.a) - sum(odGame.b)) / 2 <= FAIR, 'overdue: even teams, note names only who plays');
+  console.assert(!/waited/.test(odGame.note||'') && Math.abs(sum(odGame.a)-sum(odGame.b))/2<=FAIR, 'waits do not force inclusion or overdue notes');
   S = { players: [], courts: [], results: [], tournament: null };
   // Streaks: matched 1.5 higher after 3 wins in a row, 1.5 lower after 3 losses; a cancelled game doesn't count; real ratings unchanged.
   S = { players: [pl(3, 0), pl(3, 1), pl(3, 2)], courts: [], results: [], tournament: null };
@@ -1127,7 +1119,7 @@ export function selfCheck() {
   S = { players: [0, 1, 2, 3, 4, 5, 6, 7].map(i => ({ ...pl(3, i), name: 'W' + i, readyAt: Date.now() - 60000 + i })), courts: [], results: [], tournament: null };
   S.players[7].since = Date.now() - 22 * 60000; S.results.push({ winner: 0, a: [S.players[7].id], b: ['x'], start: Date.now() - 3600000 });
   const due = pick('doubles', queue());
-  console.assert([...due.a, ...due.b].some(p => p.name === 'W7') && !/waited/.test(due.note || ''), 'overdue at 20 min plays next; named only after 25');
+  console.assert(![...due.a,...due.b].some(p=>p.name==='W7') && !/waited/.test(due.note||''), '20-minute waits do not override fewer games');
   // New session with the same players keeps locked teammates and rated-game counts.
   S = { players: [{ ...pl(3, 0), rated: 2 }, pl(3, 1), pl(3, 2)], courts: [], results: [{ a: ['p0-3'], b: ['p1-3'], winner: 0 }], tournament: null };
   setLock(S.players[0].id, S.players[1].id);
@@ -1135,7 +1127,7 @@ export function selfCheck() {
   console.assert(nx.players[0].lock === nx.players[1].id && nx.players[1].lock === nx.players[0].id && nx.players[0].rated === 3 && nx.players[1].rated == null, 'next session keeps locks and rated counts');
   // Balanced-only below 6.25 players per court: 13 on 2 courts plays similar groups, 12 balanced.
   S = { players: Array.from({ length: 13 }, (_, i) => pl(3, i)), courts: [court('C1', 'doubles'), court('C2', 'doubles')], results: [], tournament: null };
-  console.assert(!balancedOnly(), '13 players on 2 courts: similar groups'); S.players.pop(); console.assert(balancedOnly(), '12 on 2 courts: balanced');
+  console.assert(!balancedOnly(), '13 players on 2 courts: similar groups'); S.players.pop(); console.assert(!balancedOnly(), 'roster-size switching stays paused');
   // Start begins the game on screen, even if someone became overdue (20 min) since the screen was drawn.
   S = { players: Array.from({ length: 9 }, (_, i) => ({ ...pl(3, i), name: 'D' + i, readyAt: Date.now() - 60000 + i })), courts: [court('C1', 'doubles')], results: [], tournament: null };
   for (const p of [...S.players, S.players[8]]) S.results.push({ a: [p.id], b: ['x'], winner: 0, start: Date.now() - 3600000 });
@@ -1145,8 +1137,7 @@ export function selfCheck() {
   const afterDrift = nextPairing(S.courts[0]); fill(S.courts[0].id, drawnP);
   Date.now = realNow;
   const ids4 = g => [...g.a, ...g.b].map(p => p.id).sort().join();
-  console.assert(!names4(drawnP).includes('D8') && names4(afterDrift).includes('D8') && [...S.courts[0].match.a, ...S.courts[0].match.b].sort().join() === ids4(drawnP),
-    'Start begins the game on screen');
+  console.assert(ids4(drawnP)===ids4(afterDrift) && [...S.courts[0].match.a,...S.courts[0].match.b].sort().join()===ids4(drawnP), 'clock changes do not alter preview or Start');
   // Even games: the four on 0 games play (a 5.0, 4.0 and two 3.0s, balanced) rather than the 4.8 on 1 game who'd make a closer
   // range, which would leave a 0-game player waiting while someone reaches 2.
   S = { players: [5.0, 4.0, 3.0, 3.0, 5.0, 4.9, 4.8].map((sk, i) => ({ ...pl(sk, i), name: String(i), readyAt: Date.now() - 60000 + i })),
@@ -1158,8 +1149,7 @@ export function selfCheck() {
   // Four rested but no fair game among them: they play anyway, strongest with weakest, rather than call anyone back.
   const four4 = [5.0, 3.1, 3.3, 3.2, 4.5, 2.9, 3.0, 3.6].map(pl);
   const rest4 = pickDoubles(four4, 0, { justOff: new Set(four4.slice(4).map(p => p.id)) });
-  console.assert([...rest4.a, ...rest4.b].map(p => p.name).sort().join() === '0,1,2,3' && [rest4.a, rest4.b].some(t => t.map(p => p.name).sort().join() === '0,1')
-    && /straight back/.test(rest4.note), 'four rested play, strongest with weakest, nobody called back');
+  console.assert(Math.abs(sum(rest4.a)-sum(rest4.b))/2<=FAIR, 'balanced recall is preferred to uneven rested teams');
   // Fewest games before fewest repeats: A, B and C (1 game each) play although A and B met last game; D, E, F have 3.
   const fg = ['H', 'A', 'B', 'C', 'D', 'E', 'F'].map((n, i) => ({ ...pl(3, i), name: n }));
   const fgGame = pickDoubles(fg, 0, { recent: { [fg[1].id]: { partners: new Set(), opponents: new Set([fg[2].id]) }, [fg[2].id]: { partners: new Set(), opponents: new Set([fg[1].id]) } },
@@ -1169,7 +1159,7 @@ export function selfCheck() {
   const top = [5, 5, 5, 5, 3, 3, 3, 3].map(pl), topRecent = {};
   for (let i = 0; i < 4; i++) topRecent[top[i].id] = { partners: new Set([top[i ^ 1].id]), opponents: new Set([0, 1, 2, 3].filter(x => (x >> 1) !== (i >> 1)).map(x => top[x].id)) };
   const mixedUp = pickDoubles(top, 0, { recent: topRecent });
-  console.assert(mixedUp.note === 'mixed teams for new partners' && repeats(mixedUp.a, mixedUp.b, topRecent) < REPEAT_LIMIT, 'balanced teams break up a repeat');
+  console.assert([...mixedUp.a,...mixedUp.b].every(p=>top.slice(0,4).includes(p)), 'repeated foursomes keep their turns');
   const resting = [5, 4.2, 3.8, 3.0, 5, 5, 4.8].map(pl);
   const restGame = pickDoubles(resting, 0, { justOff: new Set(resting.slice(4).map(p => p.id)) });
   console.assert([...restGame.a, ...restGame.b].map(p => p.name).sort().join() === '0,1,2,3' && restGame.note === 'mixed teams so nobody goes straight back', 'rest first');
@@ -1178,7 +1168,7 @@ export function selfCheck() {
   S = { players: [0, 1, 2, 3, 4, 5, 6, 7].map(fresh), courts: [], results: [], tournament: null };
   for (const i of [6, 7]) { S.players[i].since = Date.now() - 50 * 60000; S.results.push({ winner: 0, a: [S.players[i].id], b: ['x'], start: Date.now() - 3600000 }); }
   const od = pick('doubles', queue());
-  console.assert([S.players[6].id, S.players[7].id].every(x => [...od.a, ...od.b].some(p => p.id === x)) && /waited/.test(od.note), 'overdue players play next');
+  console.assert(!/waited/.test(od.note||''), 'overdue priority is paused');
   // More overdue than a court takes: fewest games first, and a late arrival counts at par (not ahead for the games they missed).
   S = { players: ["C", "D", "E", "F", "A", "Late", "G", "H"].map((nm, i) => ({ ...fresh(i), name: nm })), courts: [], results: [], tournament: null };
   for (const [i, games, mins] of [[0, 2, 25], [1, 2, 25], [2, 2, 25], [3, 2, 25], [5, 0, 27], [4, 3, 28]]) {
@@ -1187,14 +1177,14 @@ export function selfCheck() {
   }
   S.players[5].credit = 3;
   const few = pick("doubles", queue());
-  console.assert([...few.a, ...few.b].map(p => p.name).sort().join() === "C,D,E,F", "overdue: fewest games first, a late arrival at par");
+  console.assert(![...few.a,...few.b].some(p=>['A','Late'].includes(p.name)), 'counted games still include arrival credit');
   S.players[4].since=Date.now()-50*60000;S.players[5].since=Date.now()-40*60000;
   const hardWait=pick('doubles',queue());
-  console.assert(['A','Late'].every(n=>[...hardWait.a,...hardWait.b].some(p=>p.name===n)), '30-minute waits take priority over the fewest-games preference');
+  console.assert(![...hardWait.a,...hardWait.b].some(p=>['A','Late'].includes(p.name)), 'long waits do not override counted games');
   S = { players: [5, 4.5, 3.5, 3, 3, 3, 2, 1].map((sk, i) => ({ ...fresh(i), skill: sk })), courts: [], results: [], tournament: null };
   S.players[0].since = Date.now() - 35 * 60000; S.results.push({ winner: 0, a: [S.players[0].id], b: ['x'], start: Date.now() - 3600000 });
   const st = pick('doubles', queue()), stSk = [...st.a, ...st.b].map(p => p.skill);
-  console.assert(stSk.includes(5) && Math.max(...stSk) - Math.min(...stSk) <= OVERDUE_SPREAD + 1e-9, 'an overdue game stays within 2 levels');
+  console.assert(!stSk.includes(5), 'waiting does not force an overplayed player into the game');
   // Late arrivals: behind 0-game players, ahead of everyone who has played, at par; then the normal order.
   S = { players: ['X', 'Y', 'Z'].map((n, i) => ({ ...fresh(i), name: n })), courts: [], results: [], tournament: null };
   for (let i = 0; i < 3; i++) S.results.push({ winner: 0, a: [S.players[0].id], b: [S.players[1].id], start: Date.now() - 3600000 });
@@ -1292,18 +1282,18 @@ export function selfCheck() {
   setLock(id(0),id(1));
   console.assert(!pick('doubles',queue()), 'a locked team never immediately faces weaker opponents');
   S.players[2].credit=S.players[3].credit=2;
-  console.assert(pick('doubles',queue())?.note?.includes('catch up on games'), 'an unmatchable lock releases before falling further behind');
+  console.assert(!pick('doubles',queue()), 'game-count deficit does not split an unmatchable pair');
   S.players[2].credit=S.players[3].credit=null;
   for (const p of S.players) p.since = p.readyAt = Date.now()-21*60000;
   S.results.push({a:[id(2)],b:[id(3)],winner:0,start:Date.now()-21*60000});
   const released = pick('doubles',queue());
-  console.assert(released && released.a.some(p=>p.id===id(0)) !== released.a.some(p=>p.id===id(1)), 'unmatchable pairs become independently eligible at the 20-minute priority');
+  console.assert(!released, 'locked pairs wait the full 30 minutes');
   S = {players:[4,4,...Array(12).fill(2),4.1,4.1].map((skill,i)=>({...fresh(i),skill})),courts:[court('C1','doubles')],results:[],tournament:null};
   setLock(id(0),id(1));
   const ratingLock = lockContext(queue())[0], fullLine = lockedGame(queue(),ratingLock,[ratingLock]);
   console.assert(fullLine && fullLine.b.some(p=>p.id===id(14)) && fullLine.b.some(p=>p.id===id(15)), 'locked opponents are searched beyond twelve waiting players');
   S.results.push({a:[id(14)],b:[id(15)],winner:0,start:Date.now()});
-  console.assert(!lockedGame(queue(),ratingLock,[ratingLock]), 'locked opponents keep rest protection');
+  console.assert(!!lockedGame(S.players,ratingLock,[ratingLock]), 'balanced locked opponents may be recalled within one game');
   S.results=[];S.players[14].credit=S.players[15].credit=3;
   console.assert(!lockedGame(queue(),ratingLock,[ratingLock]), 'locked opponents cannot be more than one game ahead');
   S = {players:Array.from({length:9},(_,i)=>fresh(i)),courts:[court('C1','doubles')],results:[],tournament:null};
@@ -1312,7 +1302,7 @@ export function selfCheck() {
   S.courts[0].match={a:[id(0),id(2)],b:[id(3),id(4)],start:Date.now()};
   S.players[1].first=true;S.players[1].since=Date.now();
   const independent=pick('doubles',eligible('doubles'));
-  console.assert(independent && [...independent.a,...independent.b].some(p=>p.id===id(1)), 'cooldown partners can play on different courts at the same time');
+  console.assert(eligible('doubles').some(p=>p.id===id(1)) && splitDue(id(0),id(1)), 'cooldown partners remain independently eligible');
   for(const first of [0,2]) {
     S={players:Array.from({length:4},(_,i)=>fresh(i)),courts:[court('C1','doubles')],results:[],tournament:null};
     setLock(id(0),id(1));
@@ -1355,14 +1345,10 @@ export function scheduledNeedsOrdinary(id) {
 export function pickAvailable(f, line, choice = 0, allowIdleRelease = false, waitForBusyPartner = true) {
   if (f !== 'doubles') return pickCore(f, line, choice);
   const busy = onCourt(), now = Date.now();
-  line = line.filter(p => !(waitForBusyPartner && isLocked(p) && busy.has(p.lock) && !splitDue(p.id, p.lock) && now - waitStart(p) < WAIT_PRIORITY));
+  line = line.filter(p => !(waitForBusyPartner && isLocked(p) && busy.has(p.lock) && !splitDue(p.id, p.lock) && now - waitStart(p) < LOCK_WAIT));
   const locks = lockContext(line);
   if (!locks.length) return pickCore(f, line, choice);
-  const counts = gamesCounted();
-  for (const l of locks) {
-    const own = Math.min(counts[l.x],counts[l.y]), behind = line.some(p => counts[p.id] > own + LOCK_GAME_LEAD);
-    if (!l.apart && (behind || [P(l.x),P(l.y)].some(p => now-waitStart(p) >= WAIT_PRIORITY)) && !lockedGame(line,l,locks)) l.apart=true;
-  }
+  for (const l of locks) if (!l.apart && [P(l.x),P(l.y)].some(p=>now-waitStart(p)>=LOCK_WAIT) && !lockedGame(line,l,locks)) l.apart=true;
   const order = [];
   for (const p of line) if (!order.includes(p)) {
     order.push(p);
@@ -1375,14 +1361,31 @@ export function pickAvailable(f, line, choice = 0, allowIdleRelease = false, wai
     let p; try { p = pickCore(f, candidates, choice); } finally { lockCtx = null; }
     return p && keepsLocks(p.a.map(x => x.id), p.b.map(x => x.id), locks, true, protection) ? lockNotes(p, locks) : null;
   };
-  for (const l of locks) if (!l.apart && [P(l.x),P(l.y)].some(p => now-waitStart(p) >= WAIT_PRIORITY)) {
-    const g=lockedGame(order,l,locks); if(g) return g;
-  }
   const p = core(order); if (p) return p;
   for (const l of locks) if (!l.apart) { const g = lockedGame(order, l, locks); if (g) return g; }
   const held = new Set(locks.filter(l => !l.apart).flatMap(l => [l.x, l.y]));
-  const free = core(order.filter(p => !held.has(p.id))); if (free) return free;
-  if (!allowIdleRelease) return null;
-  for (const l of locks) if (!l.apart) { l.apart = true; l.idle = true; }
-  return core(line);
+  return core(order.filter(p => !held.has(p.id)));
+}
+
+export function rotateTeams(p,choice=0){
+  const all=fairSplits([...p.a,...p.b]).filter(t=>Math.abs(sum(t.a)-sum(t.b))/2<=FAIR+1e-9 && (!lockCtx||keepsLocks(t.a.map(x=>x.id),t.b.map(x=>x.id),lockCtx.locks,true,lockCtx.protection)));
+  const history=counted();
+  const last=team=>{let n=-1;history.forEach((g,i)=>{if([g.a,g.b].some(t=>team.every(x=>t.includes(x.id))))n=i;});return n;};
+  all.sort((a,b)=>Math.max(last(a.a),last(a.b))-Math.max(last(b.a),last(b.b)) || Math.abs(sum(a.a)-sum(a.b))-Math.abs(sum(b.a)-sum(b.b)));
+  if(!all.length)return p;const t=all[choice%all.length];return {...p,a:t.a,b:t.b,options:all.length};
+}
+
+export function scheduledOnCourt(cid){
+  return (S.scheduled||[]).find(r=>r.assignedCourt===cid&&!scheduledDone(r)&&!scheduledPlaying(r)&&!scheduleBlock(r)&&![...r.a,...r.b].some(id=>onCourt().has(id)))||null;
+}
+
+export function postponeScheduled(id){
+  const r=(S.scheduled||[]).find(r=>r.id===id);if(!r||scheduledDone(r)||scheduledPlaying(r))return;
+  r.postponedUntil=Date.now()+10*60000;delete r.assignedCourt;if(S.scheduledActive===id)S.scheduledActive=null;refreshSchedule();
+}
+
+export const LOCK_WAIT=30*60000,LOCK_LOWER=0.5,LOCK_HIGHER=1.25;
+
+export function scheduledLockedPlayers(){
+  return new Set((S.scheduled||[]).filter(r=>r.assignedCourt&&scheduledOnCourt(r.assignedCourt)).flatMap(r=>[...r.a,...r.b]));
 }

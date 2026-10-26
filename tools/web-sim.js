@@ -8,7 +8,6 @@ const opt = (k, d) => { const i = process.argv.indexOf('--' + k); return i > 0 ?
 const courts = +opt('courts', 3), minutes = +opt('minutes', 180), runs = +opt('runs', 30);
 const [lenMin, lenMax] = opt('length', '10-14').split('-').map(Number); // game length range in minutes
 const pairs = (opt('pairs', '') || '').split(';').filter(Boolean).map(p => p.split(',').map(s => s.trim()));
-const locks = (opt('locks', '') || '').split(';').filter(Boolean).map(p => p.split(',').map(s => s.trim()));
 const page = loadPage(html);
 if (pairs.length && !page.setPartner) throw new Error('This web version removed pair requests. Use --locks with --parity for locked teammates.');
 if (!(page.get('SPREAD') > 0)) throw new Error('could not read the rating spread from the page');
@@ -21,7 +20,7 @@ if (process.argv.includes('--parity')) { // one night with nothing random; same 
   page.set('S', S);
   const byName = Object.fromEntries(S.players.map(p => [p.name, p.id])), truth = Object.fromEntries(S.players.map(p => [p.id, p.skill]));
   for (const [x, y] of pairs) page.setPartner(byName[x], byName[y]);
-  for (const [x, y] of locks) page.setLock(byName[x], byName[y]); // --locks "A,B;C,D"
+  for (const [x, y] of (opt('locks', '') || '').split(';').filter(Boolean).map(l => l.split(',').map(t => t.trim()))) page.setLock(byName[x], byName[y]); // --locks "A,B;C,D"
   if (opt('scheduled', '')) { S.hours=3; for (const item of opt('scheduled','').split(';')) { const sides=item.split('|').map(t=>t.split(',').map(n=>byName[n.trim()])); if(sides.length===2) page.scheduleMatch('doubles',sides[0],sides[1]); } }
   const lines = [], ends = {}, winners = {}; let k = 0;
   const drawsFile = opt('draws', null), draws = drawsFile ? JSON.parse(fs.readFileSync(drawsFile, 'utf8')) : null; // [[minutes, u], ...]
@@ -37,7 +36,10 @@ if (process.argv.includes('--parity')) { // one night with nothing random; same 
       k++;
     });
     const next = Object.entries(ends).map(([ci, e]) => [+ci, e]).sort((x, y) => x[1] - y[1] || x[0] - y[0])[0];
-    if (!next) break;
+    if (!next) {
+      if(T<t0+180*60000 && S.courts.some(c=>page.eligible(c.format).length>=(c.format==='doubles'?4:2))){T+=30000;continue;}
+      break;
+    }
     const [ci, end] = next; T = end; delete ends[ci];
     const m = S.courts[ci].match, sumT = ids => ids.reduce((a, id) => a + truth[id], 0);
     page.finish(S.courts[ci].id, ci in winners ? (winners[ci] ? 0 : 1) : sumT(m.a) >= sumT(m.b) ? 0 : 1);
@@ -65,7 +67,6 @@ function night(seed, withPairs) {
   page.set('S', S);
   const truth = Object.fromEntries(S.players.map(p => [p.id, p.skill])), byName = Object.fromEntries(S.players.map(p => [p.name, p.id]));
   if (withPairs) for (const [x, y] of pairs) page.setPartner(byName[x], byName[y]);
-  for (const [x, y] of locks) { if (!byName[x] || !byName[y]) throw new Error('Unknown locked teammate: ' + [x,y].join(', ')); page.setLock(byName[x], byName[y]); }
   const games = [], ends = {};
   while (true) {
     if (T < t0 + minutes * 60000) for (const c of S.courts) {
@@ -81,7 +82,10 @@ function night(seed, withPairs) {
       ends[c.id] = { end: T + len, g: games.length - 1 };
     }
     const next = Object.entries(ends).sort((x, y) => x[1].end - y[1].end)[0];
-    if (!next) break;
+    if (!next) {
+      if(T<t0+minutes*60000 && S.courts.some(c=>page.eligible(c.format).length>=(c.format==='doubles'?4:2))){T+=30000;continue;}
+      break;
+    }
     const [cid, { end, g }] = next; T = end; delete ends[cid];
     const m = S.courts.find(c => c.id === cid).match, str = ids => mean(ids.map(id => truth[id]));
     const aWon = rng() < 1 / (1 + 10 ** ((str(m.b) - str(m.a)) / page.get('SPREAD')));
