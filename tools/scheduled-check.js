@@ -65,9 +65,10 @@ try {
   s=fixture();request();s.results=[{a:['p0','p1'],b:['p2','p3'],winner:0,court:'Court 1',start:now-720000,end:now}];
   assert(p.scheduledReservation(),'other players need not have played');
   game=p.queueUpNext().find(g=>g.scheduled);p.fill(game.court,game);
-  assert.deepEqual(s.courts.find(c=>c.id===game.court).match.jumpers,['p0','p1','p2','p3']);
+  assert.deepEqual(s.courts.find(c=>c.id===game.court).match.jumpers,[],'already free players do not jump');
   p.finish(game.court,null);assert.equal(p.scheduledPenalties().p0||0,0,'cancel does not penalize');
-  game=p.queueUpNext().find(g=>g.scheduled);p.fill(game.court,game);p.finish(game.court,0);
+  s.courts[0].match={a:['p0','p4'],b:['p5','p6'],start:now};p.refreshSchedule();now+=60000;p.finish(s.courts[0].id,0);
+  game=p.queueUpNext().find(g=>g.scheduled);p.fill(game.court,game);assert.deepEqual(s.courts.find(c=>c.id===game.court).match.jumpers,['p0']);p.finish(game.court,0);
   assert.equal(p.scheduledPenalties().p0,2);assert.equal(p.gamesCounted().p0,p.played('p0')+2);
   s.results.push({a:['p0','p4'],b:['p5','p6'],winner:0,court:'Court 2',start:now,end:now+1});
   assert.equal(p.scheduledPenalties().p0,1);
@@ -75,9 +76,24 @@ try {
   assert.equal(p.scheduledPenalties().p0,0);p.deleteResult(s.results.length-1);assert.equal(p.scheduledPenalties().p0,1);
   p.setWinner(s.results.findIndex(r=>r.scheduled&&r.winner!=null),null);assert.equal(p.scheduledPenalties().p0,0,'correcting scheduled result removes its penalty');
   s=fixture();s.results=[{a:['p0','p1'],b:['p2','p3'],winner:0,court:'Court 1',start:now-2,end:now-1},{a:['p4','p5'],b:['p6','p7'],winner:0,court:'Court 1',start:now-1,end:now}];
-  assert.deepEqual(p.scheduledJumpers(['p0','p4']),['p4'],'rested players do not receive a jumper penalty');
+  assert.deepEqual(p.scheduledJumpers(['p0','p4']),[],'prior-court history alone does not make someone a jumper');
   s.results.push({a:['p0','p1'],b:['p2','p3'],winner:0,scheduled:'old',jumpers:['p0'],court:'Court 1',start:now,end:now});
   s.results.push({a:['p0','p1'],b:['p2','p3'],winner:0,scheduled:'new',jumpers:['p0'],court:'Court 1',start:now,end:now});
   assert.equal(p.scheduledPenalties().p0,2,'repeated scheduled jumps reset rather than stack');
+  s=fixture(12);round(s);s.players[0].away=true;const older=request();const stable=request(['p4','p5'],['p6','p7']);
+  assert.equal(p.scheduledReservation().id,stable);s.players[0].away=false;p.refreshSchedule();assert.equal(p.scheduledReservation().id,stable,'older requests cannot preempt an active hold');
+  p.cancelScheduled(stable);assert.equal(p.scheduledReservation().id,older);
+  s=fixture();round(s);p.setLock('p1','p4');s.courts[0].match={a:['p0','p4'],b:['p5','p6'],start:now};request();
+  game=p.queueUpNext().find(g=>g.court===s.courts[1].id);assert(game&&!game.scheduled&&game.note.includes('hold relaxed'));
+  p.fill(game.court,game);assert(s.courts[1].match,'idle-court fallback preview can Start');
+  assert.equal(new Set(s.courts.flatMap(c=>[...c.match.a,...c.match.b])).size,8);
+  now+=60000;p.finish(s.courts[0].id,0);assert(!p.queueUpNext().some(g=>g.court===s.courts[0].id),'only one idle release prevents endless scheduled starvation');
+  now+=60000;p.finish(s.courts[1].id,0);assert(p.queueUpNext().some(g=>g.scheduled),'the held request gathers after the borrowed game ends');
+  s=fixture(12);round(s);s.courts[0].match={a:['p0','p4'],b:['p5','p6'],start:now};s.courts[1].match={a:['p1','p7'],b:['p8','p9'],start:now};request();
+  now+=600000;p.finish(s.courts[0].id,0);now+=600000;p.finish(s.courts[1].id,0);
+  game=p.queueUpNext().find(g=>g.scheduled);p.fill(game.court,game);assert.deepEqual(s.courts.find(c=>c.id===game.court).match.jumpers,['p1'],'ten-minute rest is not an immediate return');
+  p.finish(game.court,0);const after=request();assert.equal(p.scheduledStatus(s.scheduled.find(r=>r.id===after)),'Waiting for an ordinary game');
+  s.results.push({a:['p1','p4'],b:['p5','p6'],winner:null,court:'Court 1',start:now,end:now});p.refreshSchedule();assert.equal(p.scheduledReservation(),null,'cancellation does not satisfy ordinary-game gap');
+  s.results.at(-1).winner=0;p.refreshSchedule();assert.equal(p.scheduledReservation().id,after,'one completed ordinary game permits another schedule');
   console.log('scheduled-match and end-date checks pass');
 } finally { Date.now=originalNow; }

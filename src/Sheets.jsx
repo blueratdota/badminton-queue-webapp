@@ -466,7 +466,7 @@ function ScheduledMatches() {
       </select></label>;
     })}</Section>)}
     {error&&<p role="alert">{error}</p>}
-    <p className="text-sm text-muted-foreground">Each participant must have completed one game. Available participants wait for the others. Exact teams override locks and matching rules; you still press Start. Immediate returners get a temporary two-game queue-priority penalty.</p>
+    <p className="text-sm text-muted-foreground">Each participant must have completed one game. Available participants wait for the others. Exact teams override locks and matching rules; you still press Start. Immediate returners get a temporary two-game queue-priority penalty and need one ordinary game before another scheduled match. An idle court may use held players once per request.</p>
   </Sheet>;
   return <Sheet title="Scheduled Matches" left={null} right={{label:'Done',run:closeModal}}>
     <Section foot="A match must have time to finish before the session ends. Typical duration uses the last ten completed games (12 minutes without history).">

@@ -385,38 +385,11 @@ export function streakBoost(id) {
 export const newcomer = p => !!p.credit && played(p.id) === 0;
 /** Keep locked teams only while normal rest, game-count and opponent-rating rules allow it. */
 export function pick(f, line, choice = 0, allowIdleRelease = false) {
-  if (f !== 'doubles') return pickCore(f, line, choice);
-  const busy = onCourt(), now = Date.now();
-  line = line.filter(p => !(isLocked(p) && busy.has(p.lock) && !splitDue(p.id, p.lock) && now - waitStart(p) < WAIT_PRIORITY));
-  const locks = lockContext(line);
-  if (!locks.length) return pickCore(f, line, choice);
-  const counts = gamesCounted();
-  for (const l of locks) {
-    const own = Math.min(counts[l.x],counts[l.y]), behind = line.some(p => counts[p.id] > own + LOCK_GAME_LEAD);
-    if (!l.apart && (behind || [P(l.x),P(l.y)].some(p => now-waitStart(p) >= WAIT_PRIORITY)) && !lockedGame(line,l,locks)) l.apart=true;
-  }
-  const order = [];
-  for (const p of line) if (!order.includes(p)) {
-    order.push(p);
-    const l = locks.find(l => !l.apart && (l.x === p.id || l.y === p.id));
-    if (l) order.push(P(l.x === p.id ? l.y : l.x));
-  }
-  const protection = lockProtection(line);
-  const core = candidates => {
-    lockCtx = { locks, strict: true, protection };
-    let p; try { p = pickCore(f, candidates, choice); } finally { lockCtx = null; }
-    return p && keepsLocks(p.a.map(x => x.id), p.b.map(x => x.id), locks, true, protection) ? lockNotes(p, locks) : null;
-  };
-  for (const l of locks) if (!l.apart && [P(l.x),P(l.y)].some(p => now-waitStart(p) >= WAIT_PRIORITY)) {
-    const g=lockedGame(order,l,locks); if(g) return g;
-  }
-  const p = core(order); if (p) return p;
-  for (const l of locks) if (!l.apart) { const g = lockedGame(order, l, locks); if (g) return g; }
-  const held = new Set(locks.filter(l => !l.apart).flatMap(l => [l.x, l.y]));
-  const free = core(order.filter(p => !held.has(p.id))); if (free) return free;
-  if (!allowIdleRelease) return null;
-  for (const l of locks) if (!l.apart) { l.apart = true; l.idle = true; }
-  return core(line);
+  const normal=pickAvailable(f,line,choice,allowIdleRelease);
+  if (normal || !allowIdleRelease || !line.some(p=>isLocked(p)&&onCourt().has(p.lock))) return normal;
+  const released=pickAvailable(f,line,choice,true,false);
+  if (released) released.note=[released.note,'busy locked teammate released to avoid an idle court'].filter(Boolean).join(' · ');
+  return released;
 }
 export function lockProtection(line) {
   const n = gamesCounted(), low = Math.min(...line.map(p => n[p.id])), off = lastOffCourt();
@@ -549,8 +522,10 @@ export function queueUpNext() {
     .sort((x, y) => cmp([rank(x.c.format), x.i], [rank(y.c.format), y.i])).map(x => x.c);
   // Hand-set lineups and players chosen for manual courts come first; they're off limits to the automatic picks.
   const taken = new Set(open.flatMap(c => { const pl = validPlan(c); return [...(pl ? [...pl.a, ...pl.b] : []), ...(manualSlots(c) || []).filter(Boolean)]; }));
+  const booked = new Set(taken);
   const reservation = scheduledReservation();
   const reserved = new Set(reservation ? [...reservation.a,...reservation.b] : []);
+  let borrowed = !!reservation?.idleReleased;
   const free = onCourt();
   const scheduledCourt = reservation && ![...reserved].some(id=>free.has(id)||taken.has(id)) ? open.find(c=>c.format===reservation.format&&!c.manual&&!validPlan(c)) : null;
   reserved.forEach(id=>taken.add(id));
@@ -564,9 +539,13 @@ export function queueUpNext() {
     const pl = validPlan(c);
     if (pl) { out.push({ format: c.format, a: players(pl.a), b: players(pl.b), court: c.id, options: 2 }); continue; }
     if (scheduledCourt?.id===c.id) { out.push({format:c.format,a:players(reservation.a),b:players(reservation.b),court:c.id,options:1,note:'Scheduled',scheduled:reservation.id}); continue; }
-    const p = pick(c.format, eligible(c.format).filter(x => !taken.has(x.id)), c.shuffles || 0, true);
+    let p = pick(c.format, eligible(c.format).filter(x => !taken.has(x.id)), c.shuffles || 0, true);
+    if (!p && reservation && !scheduledCourt && !borrowed) {
+      p=pick(c.format,eligible(c.format).filter(x=>!booked.has(x.id)),c.shuffles||0,true);
+      if (p) { borrowed=true; p.note=[p.note,'scheduled hold relaxed to avoid an idle court'].filter(Boolean).join(' · '); }
+    }
     if (!p) continue;
-    p.court = c.id; [...p.a, ...p.b].forEach(x => taken.add(x.id)); out.push(p);
+    p.court = c.id; [...p.a, ...p.b].forEach(x => { taken.add(x.id); booked.add(x.id); }); out.push(p);
   }
   // Busy courts: who's next there once the current game ends, earliest-started court first.
   // ponytail: a guess from who's waiting now; the players coming off other courts can change it
@@ -656,18 +635,35 @@ export function scheduleBlock(r) {
   if ([...r.a,...r.b].some(id=>played(id)===0)) return 'Waiting for participants’ first game';
   if (!endsAt() || Date.now()+scheduledDuration(r.format)>endsAt()) return 'Insufficient time';
   const ids = [...r.a,...r.b];
-  if (ids.some(id=>!P(id) || P(id).away || P(id).paused) || ids.every(id=>onCourt().has(id))) return 'Waiting for players';
+  if (ids.some(scheduledNeedsOrdinary)) return 'Waiting for an ordinary game';
+  if (ids.some(id=>!P(id) || P(id).away || P(id).paused) || (r.id!==S.scheduledActive && ids.every(id=>onCourt().has(id)))) return 'Waiting for players';
   const pinned = S.courts.flatMap(c=>c.manual ? c.manual.filter(Boolean) : validPlan(c) ? [...c.plan.a,...c.plan.b] : []);
   if (ids.some(id=>pinned.includes(id))) return 'Waiting for manual lineup';
   if (!S.courts.some(c=>c.format===r.format && !c.manual && !validPlan(c))) return 'Waiting for court';
   return null;
 }
 export function refreshSchedule() {
-  // Legacy hold windows no longer control reservations.
-  for (const r of S.scheduled || []) { delete r.heldAt; delete r.retryAt; }
+  const requests=S.scheduled||[];
+  for (const r of requests) { delete r.heldAt; delete r.retryAt; }
+  const r=scheduledReservation();
+  if (S.scheduledActive !== (r?.id||null)) {
+    S.scheduledActive=r?.id||null;
+    if (r) { r.activatedAt=Date.now();r.returning=[];r.idleReleased=false;delete r.readyJumpers; }
+  }
+  if (!r) return;
+  const ids=[...r.a,...r.b],busy=ids.filter(id=>onCourt().has(id));
+  r.returning=[...new Set([...(r.returning||[]),...busy])];
+  if (busy.length) { delete r.readyJumpers; return; }
+  if (r.readyJumpers==null) {
+    const returns=(r.returning||[]).map(id=>({id,end:counted().filter(g=>[...g.a,...g.b].includes(id)).at(-1)?.end})).filter(x=>x.end>=r.activatedAt);
+    const last=Math.max(-Infinity,...returns.map(x=>x.end));
+    r.readyJumpers=returns.filter(x=>x.end===last).map(x=>x.id);
+  }
 }
 export function scheduledReservation() {
-  return (S.scheduled||[]).find(r=>!scheduledDone(r)&&!scheduledPlaying(r)&&!scheduleBlock(r)) || null;
+  const eligible=r=>!scheduledDone(r)&&!scheduledPlaying(r)&&!scheduleBlock(r);
+  const requests=S.scheduled||[];
+  return requests.find(r=>r.id===S.scheduledActive&&eligible(r)) || requests.find(eligible) || null;
 }
 export function scheduledStatus(r) {
   if (scheduledDone(r)) return 'Completed';
@@ -692,7 +688,11 @@ export function fill(cid, shown) {
   const current = p.scheduled && queueUpNext().find(g=>g.court===cid&&g.scheduled===p.scheduled);
   if (p.scheduled && (!current || current.a.map(x=>x.id).join()!==p.a.map(x=>x.id).join() || current.b.map(x=>x.id).join()!==p.b.map(x=>x.id).join())) return;
   const held=scheduledReservation();
-  if (!p.scheduled && held && [...p.a,...p.b].some(x=>[...held.a,...held.b].includes(x.id))) return;
+  if (!p.scheduled && held && [...p.a,...p.b].some(x=>[...held.a,...held.b].includes(x.id))) {
+    const allowed=queueUpNext().find(g=>g.court===cid&&!g.scheduled);
+    if (!allowed || allowed.a.map(x=>x.id).join()!==p.a.map(x=>x.id).join() || allowed.b.map(x=>x.id).join()!==p.b.map(x=>x.id).join()) return;
+  }
+  if (!p.scheduled && held && [...p.a,...p.b].some(x=>[...held.a,...held.b].includes(x.id))) held.idleReleased=true;
   c.match = { a: p.a.map(x => x.id), b: p.b.map(x => x.id), start: Date.now(), tm: p.match ?? null, scheduled:p.scheduled ?? null, jumpers:p.scheduled ? scheduledJumpers([...p.a,...p.b].map(x=>x.id)) : null };
   c.shuffles = 0; c.plan = null; c.locked = null;
   refreshSchedule();
@@ -1343,6 +1343,46 @@ export function scheduledPenalties() {
 }
 
 export function scheduledJumpers(ids) {
-  const games=counted();
-  return ids.filter(id=>{const last=games.filter(r=>[...r.a,...r.b].includes(id)).at(-1);return last && games.filter(r=>r.court===last.court).at(-1)===last;});
+  const r=scheduledReservation();
+  return ids.filter(id=>(r?.readyJumpers||[]).includes(id));
+}
+
+export function scheduledNeedsOrdinary(id) {
+  const last=counted().filter(r=>[...r.a,...r.b].includes(id)).at(-1);
+  return !!last?.scheduled && (scheduledPenalties()[id]||0)>0;
+}
+
+export function pickAvailable(f, line, choice = 0, allowIdleRelease = false, waitForBusyPartner = true) {
+  if (f !== 'doubles') return pickCore(f, line, choice);
+  const busy = onCourt(), now = Date.now();
+  line = line.filter(p => !(waitForBusyPartner && isLocked(p) && busy.has(p.lock) && !splitDue(p.id, p.lock) && now - waitStart(p) < WAIT_PRIORITY));
+  const locks = lockContext(line);
+  if (!locks.length) return pickCore(f, line, choice);
+  const counts = gamesCounted();
+  for (const l of locks) {
+    const own = Math.min(counts[l.x],counts[l.y]), behind = line.some(p => counts[p.id] > own + LOCK_GAME_LEAD);
+    if (!l.apart && (behind || [P(l.x),P(l.y)].some(p => now-waitStart(p) >= WAIT_PRIORITY)) && !lockedGame(line,l,locks)) l.apart=true;
+  }
+  const order = [];
+  for (const p of line) if (!order.includes(p)) {
+    order.push(p);
+    const l = locks.find(l => !l.apart && (l.x === p.id || l.y === p.id));
+    if (l) order.push(P(l.x === p.id ? l.y : l.x));
+  }
+  const protection = lockProtection(line);
+  const core = candidates => {
+    lockCtx = { locks, strict: true, protection };
+    let p; try { p = pickCore(f, candidates, choice); } finally { lockCtx = null; }
+    return p && keepsLocks(p.a.map(x => x.id), p.b.map(x => x.id), locks, true, protection) ? lockNotes(p, locks) : null;
+  };
+  for (const l of locks) if (!l.apart && [P(l.x),P(l.y)].some(p => now-waitStart(p) >= WAIT_PRIORITY)) {
+    const g=lockedGame(order,l,locks); if(g) return g;
+  }
+  const p = core(order); if (p) return p;
+  for (const l of locks) if (!l.apart) { const g = lockedGame(order, l, locks); if (g) return g; }
+  const held = new Set(locks.filter(l => !l.apart).flatMap(l => [l.x, l.y]));
+  const free = core(order.filter(p => !held.has(p.id))); if (free) return free;
+  if (!allowIdleRelease) return null;
+  for (const l of locks) if (!l.apart) { l.apart = true; l.idle = true; }
+  return core(line);
 }

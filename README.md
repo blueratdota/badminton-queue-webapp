@@ -22,3 +22,5 @@ Scheduled matches are under **Settings → Scheduled Matches**. Choose exact tea
 Ended sessions show the last completed game's actual end, including the date when it differs from the session date. Existing ended records are corrected on load; empty sessions retain their recorded end.
 
 Immediate scheduled returners receive +2 ordinary queue priority games; this drops to +1 and then zero after their next two completed ordinary games. Reservations no longer expire.
+
+Active reservations remain stable. Only the final returning group receives the immediate-return penalty. Penalized players need one completed ordinary game before another scheduled match. Held players may fill an otherwise idle court once per active request; subsequent holding ensures the scheduled group can gather.

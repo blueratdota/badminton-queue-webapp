@@ -81,4 +81,4 @@ dark.addEventListener('change', applyTheme);
 applyTheme();
 
 // Reservations expire and rejoin the ordinary rotation while the app is open.
-setInterval(() => { const s=getS(), before=JSON.stringify([s.scheduled,s.scheduleUnlocked]); refreshSchedule(); if (before!==JSON.stringify([s.scheduled,s.scheduleUnlocked])) save(); }, 5000);
+setInterval(() => { const s=getS(), before=JSON.stringify([s.scheduled,s.scheduledActive]); refreshSchedule(); if (before!==JSON.stringify([s.scheduled,s.scheduledActive])) save(); }, 5000);
