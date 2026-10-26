@@ -466,7 +466,7 @@ function ScheduledMatches() {
       </select></label>;
     })}</Section>)}
     {error&&<p role="alert">{error}</p>}
-    <p className="text-sm text-muted-foreground">Exact teams override matching rules. Everyone active must finish a game first. Players may be held for one typical game; you still press Start.</p>
+    <p className="text-sm text-muted-foreground">Each participant must have completed one game. Available participants wait for the others. Exact teams override locks and matching rules; you still press Start. Immediate returners get a temporary two-game queue-priority penalty.</p>
   </Sheet>;
   return <Sheet title="Scheduled Matches" left={null} right={{label:'Done',run:closeModal}}>
     <Section foot="A match must have time to finish before the session ends. Typical duration uses the last ten completed games (12 minutes without history).">

@@ -115,6 +115,8 @@ export function gamesCounted() {
   const n = {};
   for (const p of S.players) n[p.id] = p.credit || 0;
   for (const r of counted()) for (const id of [...r.a, ...r.b]) if (id in n) n[id]++;
+  const penalty=scheduledPenalties();
+  for (const id in n) n[id]+=penalty[id]||0;
   return n;
 }
 /** Everyone here and off court: anyone moved to the front, then the four who just came off behind everyone rested (so nobody
@@ -622,7 +624,7 @@ export function lockSide(id, side) {
 }
 
 // ---------- scheduled matches ----------
-// Holds and retry windows use the same estimate; no background job or second matching engine.
+// One reservation; duration estimates only enforce the session deadline.
 export const SCHEDULE_DEFAULT = 12 * 60000;
 export function scheduledDuration(format) {
   const lens = counted().filter(r => r.a.length === NEED[format] / 2 && r.end > r.start).slice(-10).map(r => r.end - r.start).sort((a,b)=>a-b);
@@ -651,7 +653,7 @@ export const scheduledPlaying = r => S.courts.some(c => c.match?.scheduled === r
 export function scheduleBlock(r) {
   if (S.ended != null) return 'Session ended';
   if (S.tournament) return 'Waiting for queue mode';
-  if (!S.scheduleUnlocked || [...r.a,...r.b].some(id=>played(id)===0)) return 'Waiting for first round';
+  if ([...r.a,...r.b].some(id=>played(id)===0)) return 'Waiting for participants’ first game';
   if (!endsAt() || Date.now()+scheduledDuration(r.format)>endsAt()) return 'Insufficient time';
   const ids = [...r.a,...r.b];
   if (ids.some(id=>!P(id) || P(id).away || P(id).paused) || ids.every(id=>onCourt().has(id))) return 'Waiting for players';
@@ -661,25 +663,16 @@ export function scheduleBlock(r) {
   return null;
 }
 export function refreshSchedule() {
-  const active = S.players.filter(p=>!p.away&&!p.paused);
-  if (!S.scheduleUnlocked && active.length && active.every(p=>played(p.id)>0)) S.scheduleUnlocked = true;
-  let held = false;
-  for (const r of S.scheduled || []) {
-    if (scheduledDone(r) || scheduledPlaying(r)) { r.heldAt = null; continue; }
-    const duration = scheduledDuration(r.format), blocked = scheduleBlock(r);
-    if (r.heldAt != null && Date.now() >= r.heldAt+duration) { r.heldAt=null; r.retryAt=Date.now()+duration; }
-    if (blocked || held) r.heldAt=null;
-    if (!blocked && !held && !(r.retryAt>Date.now())) { r.heldAt ??= Date.now(); held=true; }
-  }
+  // Legacy hold windows no longer control reservations.
+  for (const r of S.scheduled || []) { delete r.heldAt; delete r.retryAt; }
 }
 export function scheduledReservation() {
-  return (S.scheduled||[]).find(r=>!scheduledDone(r)&&!scheduledPlaying(r)&&r.heldAt!=null&&Date.now()<r.heldAt+scheduledDuration(r.format)&&!scheduleBlock(r)) || null;
+  return (S.scheduled||[]).find(r=>!scheduledDone(r)&&!scheduledPlaying(r)&&!scheduleBlock(r)) || null;
 }
 export function scheduledStatus(r) {
   if (scheduledDone(r)) return 'Completed';
   if (scheduledPlaying(r)) return 'Playing';
   const blocked = scheduleBlock(r); if (blocked) return blocked;
-  if (r.retryAt>Date.now()) return 'Waiting for next reservation';
   const busy=onCourt();
   if ([...r.a,...r.b].some(id=>busy.has(id))) return 'Waiting for players';
   return scheduledReservation()?.id===r.id && S.courts.some(c=>!c.match&&c.format===r.format&&!c.manual&&!validPlan(c)) ? 'Ready' : 'Waiting for court';
@@ -700,7 +693,7 @@ export function fill(cid, shown) {
   if (p.scheduled && (!current || current.a.map(x=>x.id).join()!==p.a.map(x=>x.id).join() || current.b.map(x=>x.id).join()!==p.b.map(x=>x.id).join())) return;
   const held=scheduledReservation();
   if (!p.scheduled && held && [...p.a,...p.b].some(x=>[...held.a,...held.b].includes(x.id))) return;
-  c.match = { a: p.a.map(x => x.id), b: p.b.map(x => x.id), start: Date.now(), tm: p.match ?? null, scheduled:p.scheduled ?? null };
+  c.match = { a: p.a.map(x => x.id), b: p.b.map(x => x.id), start: Date.now(), tm: p.match ?? null, scheduled:p.scheduled ?? null, jumpers:p.scheduled ? scheduledJumpers([...p.a,...p.b].map(x=>x.id)) : null };
   c.shuffles = 0; c.plan = null; c.locked = null;
   refreshSchedule();
 }
@@ -729,7 +722,7 @@ export function adjust(ids, d) {
     cancelled: it's kept in the history, but like Undo Start the players are back exactly where they were in line. */
 export function finish(cid, winner) {
   const c = courtById(cid); const m = c?.match; if (!m) return;
-  const r = { a: m.a, b: m.b, winner, court: c.name, start: m.start, end: Date.now(), changes: null, label: null, scheduled:m.scheduled ?? null };
+  const r = { a: m.a, b: m.b, winner, court: c.name, start: m.start, end: Date.now(), changes: null, label: null, scheduled:m.scheduled ?? null, jumpers:m.jumpers ?? null };
   if (winner != null) {
     // A win is a win: game length isn't counted (games to 11 and to 21 last very different times).
     const d = ratingChange(avg(m.a), avg(m.b), winner === 0);
@@ -1338,4 +1331,18 @@ export function streakDots(filled, boost) {
   const clamp = x => Math.min(1, Math.max(0, x));
   const parts = [1, 2, 3, 4, 5].map(i => boost > 0 ? (i > filled ? clamp(filled + boost - (i - 1)) : 0) : boost < 0 ? (i <= filled ? clamp(i - (filled + boost)) : 0) : 0);
   return { parts, ring: boost < 0 && -boost > filled, fire: boost > 0 && filled + boost > 5 };
+}
+
+export function scheduledPenalties() {
+  const n = {};
+  for (const r of counted()) for (const id of [...r.a,...r.b]) {
+    if (r.scheduled && (r.jumpers||[]).includes(id)) n[id]=2;
+    else if (!r.scheduled) n[id]=Math.max(0,(n[id]||0)-1);
+  }
+  return n;
+}
+
+export function scheduledJumpers(ids) {
+  const games=counted();
+  return ids.filter(id=>{const last=games.filter(r=>[...r.a,...r.b].includes(id)).at(-1);return last && games.filter(r=>r.court===last.court).at(-1)===last;});
 }

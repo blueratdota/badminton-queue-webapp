@@ -3,7 +3,7 @@ import { useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Ellipsis, CirclePause, Pause, Play, Pencil, ArrowUpToLine, Trash2, Trophy, UserX } from 'lucide-react';
 import { cn } from 'cn';
-import { getS, queue, played, onCourt, balancedOnly, BALANCED_BELOW, waitStart, startedAt, isLocked, arrive, P, champion, tEntrant, entrantName, sidesIfReady, rrTable } from './engine';
+import { scheduledPenalties, getS, queue, played, onCourt, balancedOnly, BALANCED_BELOW, waitStart, startedAt, isLocked, arrive, P, champion, tEntrant, entrantName, sidesIfReady, rrTable } from './engine';
 import { act, openModal, openEdit as edit, confirm } from './store';
 import { cap, plural, row, Dots, Section } from './bits';
 import { Button } from '@/components/ui/button';
@@ -90,7 +90,7 @@ function QueueRow({ p, pos }) {
             <span className="flex min-w-7 justify-end font-semibold tabular-nums text-muted-foreground">{pos ?? <CirclePause className="size-5" />}</span>
             <span className="grid min-w-0">
               <b className="font-semibold [overflow-wrap:anywhere]">{p.name}</b>
-              <small className="text-[13px] text-muted-foreground">{played(p.id)} played{isLocked(p) ? ` · with ${P(p.lock).name}` : ''}{startedAt() != null && S.ended == null ? ` · ${Math.max(0, Math.floor((Date.now() - waitStart(p)) / 60000))} min` : ''}</small>
+              <small className="text-[13px] text-muted-foreground">{played(p.id)} played{scheduledPenalties()[p.id] ? ` · priority cooldown ${scheduledPenalties()[p.id]}` : ''}{isLocked(p) ? ` · with ${P(p.lock).name}` : ''}{startedAt() != null && S.ended == null ? ` · ${Math.max(0, Math.floor((Date.now() - waitStart(p)) / 60000))} min` : ''}</small>
             </span>
           </button>
           <DropdownMenu>

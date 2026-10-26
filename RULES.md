@@ -217,7 +217,8 @@ Within those steps:
 | Repeat limit | 3 points |
 | Standings ranking | at least 75% of the median games played (`rankShare`) |
 | Scheduled match estimate | median of last 10 completed games of the same format; 12-minute fallback (`scheduledDefault`) |
-| Scheduled reservation and retry | one estimated game duration each |
+| Scheduled reservation | one eligible request at a time; no expiry |
+| Scheduled jump priority penalty | +2 counted games, reducing by 1 after each completed ordinary game; repeated jumps reset to 2 |
 | Wait target | 30 minutes; priority from 20 minutes, longest waiting first at 30+, named on court at 25+ |
 | Late arrivals | credit only from 30 minutes after the first game; first 4 waiting go first, the rest at par; at most 2 per game |
 | Overdue game, worst case | within 2 levels, balanced teams |
@@ -233,11 +234,12 @@ Within those steps:
 ## 14. Scheduled matches
 
 - **Settings → Scheduled Matches** lets the organizer choose exact singles or doubles teams, view requests, or cancel pending ones. Scheduling uses the session length chosen when creating the session (or adjusted in Session Settings); the match form does not ask for or change it. Older sessions without a length must have one set in Session Settings first. These are deliberate manual overrides of rating balance, locked teammates and cooldowns, not automatic team suggestions.
-- Scheduling unlocks once every present, active player has completed one non-cancelled game. That milestone stays unlocked after late arrivals, but each requested participant must have completed a game too. Absent and sitting-out players cannot be reserved.
-- Requests run in creation order, skipping blocked ones. Only one request reserves players at a time. Existing manual lineups and games already playing take priority; the next compatible automatic court offers the scheduled game. Everyone else continues ordinary rotation.
-- Ready players may be held for one estimated game duration while their teammates and a court become available. After that, they return to ordinary rotation for one estimated duration before retrying. The estimate is the median of the last ten completed games of the same format, or **12 minutes** without history.
-- A request needs enough time before the planned session end for that estimate. Estimates are not a guarantee. Status shows first-round, player/court, retry, insufficient-time, playing or completed conditions.
-- **Scheduled** lineups remain exact; the organizer still presses Start. Start rechecks availability and time remaining. A completed game fulfills a request once; Undo Start or cancelling the game returns it to pending. New sessions do not inherit requests. The scheduler updates while the app is active, without background execution.
+- Each requested participant must have completed one non-cancelled game in this session. Other players do not need to have played. Absent and sitting-out players cannot be reserved.
+- Requests run in creation order, skipping blocked requests, including requests whose entire lineup is still playing. Only one request holds available participants at a time. They wait until their teammates and a compatible automatic court are free; there is no timeout or retry window. Other players continue ordinary rotation. Manual lineups and games underway are preserved.
+- Exact scheduled teams may break locked partnerships, rating balance, ordinary rest protections and priority penalties. The organizer still presses **Start**; previews and Start use the same lineup and recheck remaining session time.
+- **Immediate returners:** at Start, a participant qualifies if their latest completed game is also the latest completed game on that previous court. The started match records these players. After a completed scheduled game, they count as **two extra games ahead** in ordinary queue ordering. Their next completed ordinary game reduces this to one, and the following ordinary game removes it. Repeated qualifying scheduled returns reset to two rather than stacking. Actual games played and ratings are unchanged by this penalty; normal wait protections still apply. Queue rows show the remaining priority cooldown separately.
+- A scheduled match requires enough remaining session time for the median duration of the last ten completed games of that format (**12 minutes** without history). Duration estimates cannot guarantee a finish before closing. Status distinguishes participants needing their first game, waiting for players/court, insufficient time, playing and completed.
+- Completion fulfills a request once. Undo Start or cancelling returns it to pending and applies no penalty. Correcting or deleting results recalculates penalties from completed history. New sessions carry neither requests nor priority penalties. Old milestone and hold/retry fields are ignored. Scheduling updates while the app is active; it does not require background execution.
 
 ### Actual session end date
 
