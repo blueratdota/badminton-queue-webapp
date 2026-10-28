@@ -7,9 +7,10 @@ struct ShuttleQueueApp: App {
     init() {
         #if DEBUG
         SessionState.selfCheck()
+        Simulation.selfCheck()
+        print("DEBUG self-checks passed")
         if CommandLine.arguments.contains("-simulate") { Simulation.main() }
         if CommandLine.arguments.contains("-bench") { Simulation.bench() }
-        if CommandLine.arguments.contains("-pairsweep") { Simulation.pairSweep() }
         if CommandLine.arguments.contains("-waitsweep") { Simulation.waitSweep() }
         if CommandLine.arguments.contains("-parity") { Simulation.parity() }
         #endif
@@ -19,10 +20,37 @@ struct ShuttleQueueApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(s: $store.current, past: $store.past)
+            Group {
+                #if DEBUG
+                if CommandLine.arguments.contains("-schedule-ui"), !store.sessions.isEmpty {
+                    ScheduledMatchesSheet(s: $store.sessions[store.sessions.count - 1])
+                } else if CommandLine.arguments.contains("-schedule-new-ui"), !store.sessions.isEmpty {
+                    ScheduleMatchSheet(s: $store.sessions[store.sessions.count - 1])
+                } else {
+                    HomeView(sessions: $store.sessions)
+                }
+                #else
+                HomeView(sessions: $store.sessions)
+                #endif
+            }
                 .onChange(of: store) { store.save() }
                 .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
+                .capped()
         }
+    }
+}
+
+/// Stable visual randomness: independent courts without affecting matchmaking or saved data.
+struct RallyMotion {
+    let seed: UInt32
+    init(_ courtID: String) {
+        seed = courtID.utf8.reduce(UInt32(2166136261)) { ($0 ^ UInt32($1)) &* 16777619 }
+    }
+    func unit(_ shot: Int, _ channel: Int) -> Double {
+        var x = seed ^ (UInt32(truncatingIfNeeded: shot + 1) &* 374761393)
+            ^ (UInt32(truncatingIfNeeded: channel + 1) &* 668265263)
+        x = (x ^ (x >> 13)) &* 1274126177
+        return Double(x ^ (x >> 16)) / Double(UInt32.max)
     }
 }
 
@@ -36,6 +64,8 @@ enum Preference: String, Codable, CaseIterable {
 }
 
 let skillNames = ["New", "Beginner", "Intermediate", "Advanced", "Strong"]
+/// What each level button sets (Add Player, Edit Player's "Set level"). Names still follow the rounded rating, and each preset rounds to its own level.
+let skillPresets = [1.0, 1.75, 2.5, 3.5, 4.5]
 
 struct Player: Identifiable, Codable, Equatable {
     var id = UUID()
@@ -46,9 +76,10 @@ struct Player: Identifiable, Codable, Equatable {
     var readyAt = Date()
     var first: Bool? // moved to front by hand; cleared after their next game
     var since: Date? // when they last became free to play (arrived, came back in, finished a game); nil = readyAt
-    var partner: UUID? // partner request (set on both): teamed up about every other game when a fair game allows
     var credit: Int? // games counted for queue order on arrival: the least anyone present had played, so a late arrival joins at par
     var away: Bool? // true = not here (yet): out of the line until marked present; nil = present
+    var rated: Int? // rated games before this session: 0 for a new player; nil = a regular from before this was counted
+    var lock: UUID? // locked teammate (set on both): always play doubles as a team; see SessionState's locked teammates
 
     /// The whole-number level shown as dots and in the skill picker.
     var level: Int { min(5, max(1, Int(skill.rounded()))) }
@@ -58,6 +89,9 @@ struct Match: Codable, Equatable {
     var teamA: [UUID]
     var teamB: [UUID]
     var start = Date()
+    var scheduled: UUID?
+    var jumpers: [UUID]?
+    var queueOverride: Bool? // explicit organiser replacement, retained when matching mode changes
     var tournamentMatch: Int? // TMatch id when this is a tournament game
 }
 
@@ -69,6 +103,7 @@ struct Court: Identifiable, Codable, Equatable {
     var shuffles: Int? // how many times the organiser tapped shuffle on the "Next up" preview
     var locked: Int?   // a side of "Next up" kept when shuffling (0 = team A, 1 = team B); cleared when the game starts
     var plan: Match?   // a "Next up" lineup the organiser set by hand (replacing a player); overrides the automatic pick
+    var manual: [UUID?]? // manual mode: the players chosen slot by slot (team A, then team B); nil = automatic. Cleared when its game finishes
 }
 
 /// A finished game. `winner` is 0 for team A, 1 for team B, nil if no result was recorded.
@@ -80,6 +115,8 @@ struct GameResult: Codable, Equatable {
     var start: Date
     var end = Date()
     var changes: [UUID: Double]? // rating change actually applied to each player (after the 1–5 cap)
+    var scheduled: UUID?
+    var jumpers: [UUID]?
     var tournamentLabel: String?  // e.g. "Round 2", "Upper Final"
 
     var length: TimeInterval { end.timeIntervalSince(start) }
@@ -91,7 +128,9 @@ struct Pairing {
     var b: [Player]
     var match: Int? // TMatch id in tournament mode
     var court: UUID? // the open court this game is lined up for (nil: a preview for a busy format)
+    var rematchFallback = false
     var options = 1 // how many fair alternatives the shuffle button can cycle through
+    var scheduled: UUID?
     var note: String? // why doubles teams are mixed rather than similar skill (nil when similar)
 }
 
@@ -137,18 +176,119 @@ enum InstallExpiry {
 }
 
 struct Store: Codable, Equatable {
-    var current = SessionState()
-    var past: [SessionState] = []
+    /// Every session: live ones (not ended) and past ones.
+    var sessions: [SessionState] = []
+
+    /// The session simulations start from: the newest live one, else the newest.
+    var current: SessionState {
+        sessions.filter(\.isLive).max { $0.date < $1.date } ?? sessions.max { $0.date < $1.date } ?? SessionState()
+    }
+
+    init(sessions: [SessionState] = []) { self.sessions = sessions }
+
+    private enum CodingKeys: String, CodingKey { case sessions, current, past }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let all = try c.decodeIfPresent([SessionState].self, forKey: .sessions) { sessions = all; for i in sessions.indices { sessions[i].normalizeEnd() }; return }
+        // Saved before live sessions: one current session plus earlier ones, which count as ended.
+        let past = try c.decodeIfPresent([SessionState].self, forKey: .past) ?? []
+        sessions = past.map { var x = $0; if x.ended == nil { x.ended = x.results.map(\.end).max() ?? x.date }; return x }
+        if let current = try c.decodeIfPresent(SessionState.self, forKey: .current) { sessions.append(current) }
+        for i in sessions.indices { sessions[i].normalizeEnd() }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(sessions, forKey: .sessions)
+    }
+
+    /// Match the webapp's export format without changing the iPad's saved-data format.
+    func webExportData(currentID: UUID? = nil) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        let encoded = try encoder.encode(self)
+        var all = (try JSONSerialization.jsonObject(with: encoded) as! [String: Any])["sessions"] as! [[String: Any]]
+        func teams(_ value: [String: Any]) -> [String: Any] {
+            var value = value
+            value["a"] = value.removeValue(forKey: "teamA")
+            value["b"] = value.removeValue(forKey: "teamB")
+            value["tm"] = value.removeValue(forKey: "tournamentMatch")
+            value["label"] = value.removeValue(forKey: "tournamentLabel")
+            return value
+        }
+        func slot(_ value: Slot) -> [Any] {
+            switch value {
+            case .entrant(let n): return ["e", n]
+            case .seed(let n): return ["s", n]
+            case .winnerOf(let n): return ["w", n]
+            case .loserOf(let n): return ["l", n]
+            }
+        }
+        for i in all.indices {
+            all[i]["courts"] = (all[i]["courts"] as! [[String: Any]]).map { court in
+                var court = court
+                for key in ["match", "plan"] { if let match = court[key] as? [String: Any] { court[key] = teams(match) } }
+                return court
+            }
+            all[i]["results"] = (all[i]["results"] as! [[String: Any]]).enumerated().map { j, result in
+                var result = teams(result)
+                if let changes = sessions[i].results[j].changes { result["changes"] = Dictionary(uniqueKeysWithValues: changes.map { ($0.key.uuidString, $0.value) }) }
+                return result
+            }
+            if let requests = all[i]["scheduled"] as? [[String: Any]] { all[i]["scheduled"] = requests.map(teams) }
+            if var tournament = all[i]["tournament"] as? [String: Any], let model = sessions[i].tournament {
+                tournament["matches"] = (tournament["matches"] as! [[String: Any]]).enumerated().map { j, match in
+                    var match = match
+                    match["a"] = slot(model.matches[j].a); match["b"] = slot(model.matches[j].b)
+                    return match
+                }
+                all[i]["tournament"] = tournament
+            }
+        }
+        let selected = currentID.flatMap { id in sessions.first { $0.id == id } } ?? sessions.filter(\.isLive).max { $0.date < $1.date } ?? sessions.max { $0.date < $1.date }
+        return try JSONSerialization.data(withJSONObject: ["currentId": selected.map { $0.id.uuidString } as Any? ?? NSNull(), "sessions": all], options: [.prettyPrinted, .sortedKeys])
+    }
+
+    #if DEBUG
+    static func webExportSelfCheck() {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        var session = SessionState(players: (0..<4).map { Player(name: "Export \($0)", readyAt: date) })
+        session.date = date; session.hours = 3; session.queueMatching = .equalSkill
+        let ids = session.players.map(\.id), request = ScheduledMatch(format: .doubles, teamA: Array(ids.prefix(2)), teamB: Array(ids.suffix(2)))
+        session.players[0].lock = ids[1]; session.players[1].lock = ids[0]
+        session.players[0].since = date; session.players[0].credit = 2; session.players[0].rated = 7
+        session.scheduled = [request]; session.scheduleUnlocked = true
+        session.scheduledActive = request.id
+        session.scheduled![0].activatedAt = date; session.scheduled![0].returning = [ids[0]]
+        session.scheduled![0].readyJumpers = [ids[0]]; session.scheduled![0].idleReleased = true
+        session.scheduled![0].assignedCourt = session.courts[0].id; session.scheduled![0].postponedUntil = date.addingTimeInterval(600)
+        session.courts[0].match = Match(teamA: request.teamA, teamB: request.teamB, start: date, scheduled: request.id, jumpers: [ids[0]], tournamentMatch: 0)
+        session.courts[1].plan = session.courts[0].match; session.courts[1].manual = [ids[0], nil]
+        session.results = [GameResult(teamA: request.teamA, teamB: request.teamB, winner: 0, court: "Court 1", start: date, end: date.addingTimeInterval(720), changes: [ids[0]: 0.125], scheduled: request.id, jumpers: [ids[0]], tournamentLabel: "Round Robin")]
+        session.tournament = Tournament(format: .doubles, entrants: [request.teamA, request.teamB], advance: 4)
+        let store = Store(sessions: [session])
+        let data = try! store.webExportData(currentID: session.id)
+        let json = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let exported = (json["sessions"] as! [[String: Any]])[0]
+        let result = (exported["results"] as! [[String: Any]])[0]
+        assert(exported["date"] as? Double == 1_700_000_000_000 && result["a"] as? [String] == request.teamA.map(\.uuidString))
+        assert((result["changes"] as? [String: Double])?[ids[0].uuidString] == 0.125 && result["label"] as? String == "Round Robin")
+        assert((json["sessions"] as? [[String: Any]])?.first?["queueMatching"] as? String == "equalSkill")
+        assert(json["currentId"] as? String == session.id.uuidString && session.date == date, "export preserves native data")
+        if CommandLine.arguments.contains("-export-check") { try! data.write(to: URL.documentsDirectory.appending(path: "web-export-check.json")) }
+    }
+    #endif
 
     static let url = URL.documentsDirectory.appending(path: "sessions.json")
 
     static func load() -> Store {
-        if let d = try? Data(contentsOf: url), let s = try? JSONDecoder().decode(Store.self, from: d) { return s }
+        if let d = try? Data(contentsOf: url), let s = try? JSONDecoder().decode(Store.self, from: d) { s.save(); return s }
         // Carry over the single session saved by the first version of the app.
         struct V1: Decodable { var players: [Player]; var courts: [Court] }
         if let d = try? Data(contentsOf: URL.documentsDirectory.appending(path: "session.json")),
            let v1 = try? JSONDecoder().decode(V1.self, from: d) {
-            return Store(current: SessionState(players: v1.players, courts: v1.courts))
+            return Store(sessions: [SessionState(players: v1.players, courts: v1.courts)])
         }
         return Store()
     }
@@ -156,6 +296,25 @@ struct Store: Codable, Equatable {
     func save() {
         do { try JSONEncoder().encode(self).write(to: Self.url, options: .atomic) }
         catch { print("Save failed:", error) }
+    }
+}
+
+enum QueueMatching: String, Codable, CaseIterable {
+    case auto, equalSkill, balancedSkill
+
+    var title: String {
+        switch self {
+        case .auto: return "Auto"
+        case .equalSkill: return "Equal Skill"
+        case .balancedSkill: return "Balanced Skill"
+        }
+    }
+    var explanation: String {
+        switch self {
+        case .auto: return "Similar skill first: within 1.0, then 1.5, then mixed balanced teams."
+        case .equalSkill: return "Automatic games stay within 1.0 matching rating point. Use saved ratings if a losing streak prevents a skill group; otherwise courts wait."
+        case .balancedSkill: return "Players due next play with balanced teams, allowing mixed skill levels."
+        }
     }
 }
 
@@ -169,6 +328,48 @@ struct SessionState: Codable, Equatable, Identifiable {
     ]
     var results: [GameResult] = []
     var tournament: Tournament? // nil = queue mode
+    var ended: Date? // set by End Session; nil = live
+    var name: String? // nil: shown by its date
+    var hours: Double? // planned length
+    var scheduled: [ScheduledMatch]?
+    var queueMatching: QueueMatching? // nil keeps the original Auto matching
+    var scheduleUnlocked: Bool?
+    var scheduledActive: UUID?
+
+    var matchingMode: QueueMatching { queueMatching ?? .auto }
+    var matchingHelp: String { matchingMode.explanation }
+    var waitingMessage: String { matchingMode == .equalSkill ? "Waiting for a legal group within 1.0 rating point" : "Waiting for available players" }
+
+    func skillRangeAllowed(_ ids: [UUID]) -> Bool {
+        guard matchingMode == .equalSkill else { return true }
+        let format: Format = ids.count == 2 ? .singles : .doubles
+        let skills = ids.map { matchSkill($0, format: format) }
+        return (skills.max() ?? 0) - (skills.min() ?? 0) <= Self.similarSpread + 1e-9
+    }
+
+    mutating func setQueueMatching(_ mode: QueueMatching) {
+        guard mode != matchingMode else { return }
+        queueMatching = mode
+        for i in courts.indices where courts[i].match == nil {
+            if courts[i].plan?.queueOverride != true { courts[i].plan = nil }
+            courts[i].locked = nil
+            courts[i].shuffles = nil
+        }
+    }
+
+    var title: String { name ?? date.formatted(.dateTime.weekday().day().month()) }
+    var isLive: Bool { ended == nil }
+    /// When play began: the first game's start.
+    var started: Date? { (results.map(\.start) + courts.compactMap { $0.match?.start }).min() }
+    /// When the planned length runs out, once play has begun.
+    var endsAt: Date? { hours.flatMap { h in started.map { $0.addingTimeInterval(h * 3600) } } }
+    /// When this player's wait began: their last game's end, or when they arrived. Sitting out doesn't restart it, and
+    /// nothing counts before the session's first game (before then it's now, so nobody is overdue).
+    func waitStart(_ p: Player) -> Date { max(p.since ?? p.readyAt, started ?? Self.now) }
+
+    /// The games that count. A cancelled game ("no result") stays in the history but isn't a game: it doesn't count
+    /// towards anyone's games, partners, repeats or ratings, and its players went back to where they were in line.
+    var games: [GameResult] { results.filter { $0.winner != nil } }
 
     // MARK: Matchmaking
 
@@ -200,6 +401,40 @@ struct SessionState: Codable, Equatable, Identifiable {
 
     // ponytail: "fair" = team averages within 0.75 of a level; tune if shuffles feel too narrow or too lopsided
     static let fairGap = 0.75
+    static var matchupHistory: [String: String]? // scoped to one automatic pick, like lockCtx
+    static func teamKey(_ ids: [UUID]) -> String { ids.map(\.uuidString).sorted().joined(separator: ",") }
+    var lastTeamOpponents: [String: String] {
+        var out: [String: String] = [:]
+        for r in games where r.teamA.count == 2 && r.teamB.count == 2 {
+            let a = Self.teamKey(r.teamA), b = Self.teamKey(r.teamB)
+            out[a] = b; out[b] = a
+        }
+        return out
+    }
+    static func rematchAllowed(_ a: [UUID], _ b: [UUID], history: [String: String]? = nil) -> Bool {
+        guard a.count == 2 && b.count == 2 else { return true }
+        let history = history ?? matchupHistory ?? [:], x = teamKey(a), y = teamKey(b)
+        return history[x] != y && history[y] != x
+    }
+    func automaticMatchupAllowed(_ a: [UUID], _ b: [UUID]) -> Bool {
+        guard a.count == 2 && b.count == 2 else { return true }
+        if !Self.rematchAllowed(a,b,history:lastTeamOpponents) {
+            let line = eligible(.doubles)
+            guard line.count <= Self.rematchFallbackPlayers, pick(.doubles, from: line)?.rematchFallback == true else { return false }
+        }
+        let locked = [a,b].allSatisfy { team in player(team[0])?.lock == team[1] && player(team[1])?.lock == team[0] }
+        return !locked || !lockedRematchBlocked(a,b)
+    }
+    static let rematchFallbackPlayers = 8
+    static let lockRematchGames = 2
+    static let lockGameLead = 1 // locked games cannot pull anyone further ahead of the waiting line
+
+    static func recallLimit(_ line: [Player], games: [UUID: Int], justOff: Set<UUID>) -> Int {
+        let low = line.map { games[$0.id, default: 0] }.min() ?? 0
+        let needed = max(0, 4 - line.filter { !justOff.contains($0.id) }.count)
+        let counts = line.filter { justOff.contains($0.id) }.map { games[$0.id, default: 0] }.sorted()
+        return max(low, counts.prefix(needed).last ?? low)
+    }
 
     /// Ways to split four players into two fair teams (strongest-with-newest first). A split that stacks one side
     /// is never offered; if no split is fair, the least uneven ones (ties included, so shuffle can still swap them).
@@ -213,21 +448,22 @@ struct SessionState: Codable, Equatable, Identifiable {
         return all.filter { gap($0) <= max(fairGap, best + 0.001) }.map { (a: $0.0, b: $0.1) }
     }
 
-    /// Last resort: the fairest split of these four that doesn't team up a pair waiting for its planned game.
-    static func lastResortSplits(_ four: [Player], apart: [Set<UUID>]) -> [(a: [Player], b: [Player])] {
+    /// Last resort: the fairest split of these four.
+    static func lastResortSplits(_ four: [Player]) -> [(a: [Player], b: [Player])] {
         let s = four.sorted { $0.skill > $1.skill }
         let all: [(a: [Player], b: [Player])] = [([s[0], s[3]], [s[1], s[2]]), ([s[0], s[2]], [s[1], s[3]]), ([s[0], s[1]], [s[2], s[3]])]
         func gap(_ t: (a: [Player], b: [Player])) -> Double { abs(t.a.map(\.skill).reduce(0, +) - t.b.map(\.skill).reduce(0, +)) }
-        func keepsApart(_ t: (a: [Player], b: [Player])) -> Bool {
-            !apart.contains { pair in pair.isSubset(of: t.a.map(\.id)) || pair.isSubset(of: t.b.map(\.id)) }
+        let valid = all.filter { t in
+            guard rematchAllowed(t.a.map(\.id),t.b.map(\.id)) else { return false }
+            guard let ctx = lockCtx else { return true }
+            return keepsLocks(t.a.map(\.id), t.b.map(\.id), ctx.locks, strict: ctx.strict, real: ctx.real, opponents: ctx.opponents, rested: ctx.rested)
         }
-        let ok = all.filter(keepsApart).sorted { gap($0) < gap($1) }
-        return ok.isEmpty ? fairSplits(four) : [ok[0]]
+        return valid.min { gap($0) < gap($1) }.map { [$0] } ?? []
     }
 
     /// The first in line (if rested) plus the three rested players, of the first 12, who make the evenest teams, however
     /// uneven; anyone overdue (the first `must`) included. nil if fewer than four are rested.
-    static func restedFour(_ q: [Player], must: Int, justOff: Set<UUID>, apart: [Set<UUID>]) -> [Player]? {
+    static func restedFour(_ q: [Player], must: Int, justOff: Set<UUID>) -> [Player]? {
         // The first in line and anyone overdue must play.
         guard !q.isEmpty, !q.prefix(max(1, must)).contains(where: { justOff.contains($0.id) }) else { return nil }
         let rested = Array(q.filter { !justOff.contains($0.id) }.prefix(12))
@@ -236,7 +472,8 @@ struct SessionState: Codable, Equatable, Identifiable {
         for k in 3..<rested.count {
             for j in 2..<k {
                 for i in 1..<j where (1..<must).allSatisfy([i, j, k].contains) {
-                    let four = [rested[0], rested[i], rested[j], rested[k]], t = lastResortSplits(four, apart: apart)[0]
+                    let four = [rested[0], rested[i], rested[j], rested[k]]
+                    guard let t = lastResortSplits(four).first else { continue }
                     let gap = abs(t.a.map(\.skill).reduce(0, +) - t.b.map(\.skill).reduce(0, +))
                     if gap < (best?.gap ?? .infinity) - 1e-9 { best = (gap, four) }
                 }
@@ -248,14 +485,17 @@ struct SessionState: Codable, Equatable, Identifiable {
     /// The longest-rested player plus the earliest three after them who can make fair teams;
     /// the next four in line if no group can.
     // ponytail: searches the first 12 in line (165 groups); widen if big, uneven sessions still get lopsided games
-    static func fairFour(_ q: [Player]) -> [Player] {
+    /// Keeps as many of the first `must` (anyone overdue, longest waiting first) as fair teams allow.
+    static func fairFour(_ q: [Player], must: Int = 1) -> [Player] {
         let pool = Array(q.prefix(12))
-        for k in 3..<pool.count {
-            for j in 2..<k {
-                for i in 1..<j {
-                    let four = [pool[0], pool[i], pool[j], pool[k]]
-                    let best = fairSplits(four)[0]
-                    if abs(best.a.map(\.skill).reduce(0, +) - best.b.map(\.skill).reduce(0, +)) / 2 <= fairGap { return four }
+        for keep in stride(from: max(1, must), through: 1, by: -1) {
+            for k in 3..<pool.count {
+                for j in 2..<k {
+                    for i in 1..<j where (1..<keep).allSatisfy([i, j, k].contains) {
+                        let four = [pool[0], pool[i], pool[j], pool[k]]
+                        let best = fairSplits(four)[0]
+                        if abs(best.a.map(\.skill).reduce(0, +) - best.b.map(\.skill).reduce(0, +)) / 2 <= fairGap { return four }
+                    }
                 }
             }
         }
@@ -275,8 +515,6 @@ struct SessionState: Codable, Equatable, Identifiable {
     // against 38 and 39 when triggering at 30. Retune if courts or group size change a lot.
     static var waitPriority: TimeInterval = 20 * 60 // var only so the simulation can try other triggers
     static let overdueSpread = 2.0
-    // ponytail: a pair game's team averages may differ by at most this much; raise it if far-apart pairs miss their game
-    static let pairSlack = 0.25
     #if DEBUG
     static var simulatedNow: Date? // the simulation's clock
     static var now: Date { simulatedNow ?? Date() }
@@ -308,32 +546,32 @@ struct SessionState: Codable, Equatable, Identifiable {
     typealias Pick = (splits: [(a: [Player], b: [Player])], penalty: Int, justOff: Int)
 
     static func bestFour(_ q: [Player], pool: [Int], recent: Recent, justOff: Set<UUID>, bySpread: Bool = false,
-                         must: Int = 1, together: Set<UUID> = [], apart: [Set<UUID>] = [], games: [UUID: Int] = [:], heavyFirst: Bool = false,
+                         must: Int = 1, together: Set<UUID> = [], games: [UUID: Int] = [:], heavyFirst: Bool = false,
                          allowed: ([Player]) -> Bool) -> Pick? {
         guard pool.count >= 3 else { return nil }
         var best: (key: [Int], splits: [(a: [Player], b: [Player])], penalty: Int)?
+        let lk = lockCtx.map { c in c.locks.filter { l in q.contains { $0.id == l.x } && q.contains { $0.id == l.y } } } ?? []
+        let ids = { (t: [Player]) in t.map(\.id) }
+        let limit = recallLimit(q, games: games, justOff: justOff)
         for k in 2..<pool.count {
             for j in 1..<k {
                 for i in 0..<j {
                     let picked = [pool[i], pool[j], pool[k]], four = [q[0]] + picked.map { q[$0] }
-                    guard (1..<must).allSatisfy(picked.contains), allowed(four) else { continue }
-                    let fair = fairSplits(four).filter { s in (together.isEmpty || [s.a, s.b].contains { together.isSubset(of: $0.map(\.id)) })
-                        && !apart.contains { pair in [s.a, s.b].contains { pair.isSubset(of: $0.map(\.id)) } } }
+                    guard (1..<must).allSatisfy(picked.contains), allowed(four), lk.isEmpty || lockMembers(ids(four), lk) else { continue }
+                    let fair = fairSplits(four).filter { s in rematchAllowed(ids(s.a),ids(s.b)) && (together.isEmpty || [s.a, s.b].contains { together.isSubset(of: $0.map(\.id)) })
+                        && (lk.isEmpty || keepsLocks(ids(s.a), ids(s.b), lk, strict: lockCtx!.strict, real: lockCtx!.real, opponents: lockCtx!.opponents, rested: lockCtx!.rested)) }
                     guard !fair.isEmpty else { continue }
-                    let splits = fair.enumerated()
-                        .map { (split: $0.element, penalty: repeats($0.element.a, $0.element.b, recent), order: $0.offset) }
-                        .sorted { ($0.penalty, $0.order) < ($1.penalty, $1.order) }
+                    guard !four.contains(where: { justOff.contains($0.id) && games[$0.id,default:0] > limit }) else { continue }
+                    let splits = fair.enumerated().sorted {
+                        let x = abs($0.element.a.map(\.skill).reduce(0,+) - $0.element.b.map(\.skill).reduce(0,+))
+                        let y = abs($1.element.a.map(\.skill).reduce(0,+) - $1.element.b.map(\.skill).reduce(0,+))
+                        return (x,$0.offset) < (y,$1.offset)
+                    }.map(\.element)
                     let range = four.map(\.skill).max()! - four.map(\.skill).min()!
-                    // Fewest games among the other three before fewest repeats, so players at either end of the ratings
-                    // aren't left behind while mid-rated players fill every game. bySpread (balanced teams): repeats past the
-                    // limit, then nearest ratings in quarter levels, come before that.
-                    let penalty = splits[0].penalty, off = four.filter { justOff.contains($0.id) }.count
-                    let played: Int = picked.reduce(0) { $0 + (games[q[$1].id] ?? 0) }
-                    let heavy: [Int] = bySpread || heavyFirst ? [penalty >= repeatLimit ? penalty : 0] : [] // heavyFirst: balanced-only mode
-                    let nearest: [Int] = heavy + (bySpread ? [Int((range * 4).rounded())] : [])
-                    let spreadKey: [Int] = bySpread ? [Int((range * 100).rounded())] : []
-                    let key: [Int] = [off] + nearest + [played, penalty] + spreadKey + [pool[k], picked.reduce(0, +)]
-                    if best.map({ key.lexicographicallyPrecedes($0.key) }) ?? true { best = (key, splits.map(\.split), splits[0].penalty) }
+                    let off = four.filter { justOff.contains($0.id) }.count
+                    let played = picked.reduce(0) { $0 + games[q[$1].id,default:0] }
+                    let key = [off] + (bySpread ? [Int((range*4).rounded())] : []) + [played] + (bySpread ? [Int((range*100).rounded())] : []) + [pool[k],picked.reduce(0,+)]
+                    if best.map({ key.lexicographicallyPrecedes($0.key) }) ?? true { best = (key, splits, 0) }
                 }
             }
         }
@@ -345,23 +583,23 @@ struct SessionState: Codable, Equatable, Identifiable {
     /// or repeat too much (or no similar group is waiting), a wider range, then balanced teams from the nearest ratings.
     /// `choice` is the shuffle count, cycling through that group's fair splits.
     // ponytail: searches up to 12 candidates each way (165 groups); widen if big sessions still repeat a lot
-    /// `together`: two players who must be teammates (a partner request); nil if no fair game has them together.
-    /// `accept`: an extra test every four must pass (a pair game's limits for the other players).
+    /// `together`: two players who must be teammates (hot/cold teaming); nil if no fair game has them together.
+    /// `accept`: an extra test every four must pass (a hot/cold game's limits for the other players).
     static func pickDoubles(_ q: [Player], choice: Int = 0, recent: Recent = [:], must: Int = 1, justOff: Set<UUID> = [],
-                            together: Set<UUID> = [], apart: [Set<UUID>] = [], accept: ([Player]) -> Bool = { _ in true },
-                            capSpread: Double? = nil, games: [UUID: Int] = [:], balancedOnly: Bool = false) -> Pairing? {
+                            together: Set<UUID> = [], accept: ([Player]) -> Bool = { _ in true },
+                            capSpread: Double? = nil, games: [UUID: Int] = [:], balancedOnly: Bool = false, searchLimit: Int = 12) -> Pairing? {
         guard q.count >= 4, let head = q.first else { return nil }
         // How far a pick falls short: players straight off court first (rest beats skill match), then repeats past the limit.
         func shortfall(_ g: Pick?) -> [Int] {
             guard let g else { return [.max, .max] }
-            return [g.justOff, g.penalty >= repeatLimit ? g.penalty : 0]
+            return [g.justOff, 0]
         }
         func reason(_ from: Pick?, _ to: Pick) -> String {
-            (from?.justOff ?? 0) > to.justOff ? (to.justOff == 0 ? "so nobody goes straight back" : "so fewer go straight back") : "for new partners"
+            (from?.justOff ?? 0) > to.justOff ? (to.justOff == 0 ? "so nobody goes straight back" : "so fewer go straight back") : "for balanced teams"
         }
         func similarGroup(_ spread: Double) -> Pick? {
-            let near = Array(Set(1..<must).union(q.indices.dropFirst().filter { abs(q[$0].skill - head.skill) <= spread + 1e-9 }.prefix(12))).sorted()
-            return bestFour(q, pool: near, recent: recent, justOff: justOff, must: must, together: together, apart: apart, games: games) { four in
+            let near = Array(Set(1..<must).union(q.indices.dropFirst().filter { abs(q[$0].skill - head.skill) <= spread + 1e-9 }.prefix(searchLimit))).sorted()
+            return bestFour(q, pool: near, recent: recent, justOff: justOff, must: must, together: together, games: games) { four in
                 let s = four.map(\.skill); return s.max()! - s.min()! <= spread + 1e-9 && accept(four)
             }
         }
@@ -375,8 +613,8 @@ struct SessionState: Codable, Equatable, Identifiable {
         // Balanced teams from the nearest ratings; with `capSpread` (an overdue game), only within that many levels unless
         // nothing at all is free, so the waiting player still plays.
         func balanced(_ cap: Double?) -> Pick? {
-            bestFour(q, pool: Array(1..<min(12, q.count)), recent: recent, justOff: justOff, bySpread: !balancedOnly, must: must, together: together,
-                     apart: apart, games: games, heavyFirst: balancedOnly) { four in
+            bestFour(q, pool: Array(1..<min(searchLimit, q.count)), recent: recent, justOff: justOff, bySpread: !balancedOnly, must: must, together: together,
+                     games: games, heavyFirst: balancedOnly) { four in
                 let t = fairSplits(four)[0], s = four.map(\.skill)
                 return abs(t.a.map(\.skill).reduce(0, +) - t.b.map(\.skill).reduce(0, +)) / 2 <= fairGap && accept(four)
                     && cap.map { s.max()! - s.min()! <= $0 + 1e-9 } ?? true
@@ -388,23 +626,31 @@ struct SessionState: Codable, Equatable, Identifiable {
             best = b
         }
         if best == nil && !together.isEmpty { return nil }
-        // Nobody straight back while four rested players can play: the evenest four of them, uneven teams if it must be.
-        let fallback = best == nil ? fairFour(q) : []
-        if together.isEmpty, (best?.justOff ?? fallback.filter { justOff.contains($0.id) }.count) > 0,
-           let four = restedFour(q, must: must, justOff: justOff, apart: apart) {
-            let split = lastResortSplits(four, apart: apart)[0]
-            return Pairing(format: .doubles, a: split.a, b: split.b, options: 1, note: "uneven teams so nobody goes straight back")
+        var splits = best?.splits
+        if splits == nil {
+            let limit = recallLimit(q, games: games, justOff: justOff), pool = Array(q.prefix(searchLimit))
+            outer: for k in 3..<pool.count {
+                for j in 2..<k {
+                    for i in 1..<j {
+                        let four = [pool[0],pool[i],pool[j],pool[k]]
+                        if !accept(four) || four.contains(where: { justOff.contains($0.id) && games[$0.id,default:0] > limit }) { continue }
+                        let legal = lastResortSplits(four)
+                        if !legal.isEmpty { splits = legal; break outer }
+                    }
+                }
+            }
+            note = "fairest available teams"
         }
-        let splits = best?.splits ?? lastResortSplits(fallback, apart: apart)
-        if best == nil { note = "mixed teams, no similar group free" }
+        guard let splits, !splits.isEmpty else { return nil }
         let split = splits[choice % splits.count]
         return Pairing(format: .doubles, a: split.a, b: split.b, options: splits.count, note: note)
+
     }
 
     /// Each player's partners and opponents over their last two doubles games this session.
-    func recentPairs(games: Int = 2) -> Recent {
+    func recentPairs(games: Int = 3) -> Recent {
         var out: Recent = [:], seen: [UUID: Int] = [:]
-        for r in results.reversed() where r.teamA.count == 2 {
+        for r in self.games.reversed() where r.teamA.count == 2 {
             for (mine, theirs) in [(r.teamA, r.teamB), (r.teamB, r.teamA)] {
                 for id in mine where seen[id, default: 0] < games {
                     seen[id, default: 0] += 1
@@ -420,14 +666,111 @@ struct SessionState: Codable, Equatable, Identifiable {
     /// so while there are more of them than a game needs, each shuffle draws a whole new random group from them
     /// (still within the skill rules; anyone who has played stays behind them in rest order).
     /// After that, shuffles only cycle the fair options at the front of the line.
-    /// `allowPairGame`: false when another court already has a pair game lined up (one pair game at a time).
-    func pick(_ format: Format, from line: [Player], choice: Int = 0, allowPairGame: Bool = true) -> Pairing? {
+    /// Locked teams use the normal queue protections. Unmatchable overdue pairs can play independently.
+    func pick(_ format: Format, from line: [Player], choice: Int = 0, allowIdleRelease: Bool = false) -> Pairing? {
+        let old = Self.matchupHistory
+        Self.matchupHistory = lastTeamOpponents
+        defer { Self.matchupHistory = old }
+        if let p = pickAvailable(format, from: line, choice: choice) { return p }
+        // A small waiting group can exhaust its exact-team opponents; keep every other protection on retry.
+        guard format == .doubles, line.count <= Self.rematchFallbackPlayers, line.count == eligible(format).count else { return nil }
+        Self.matchupHistory = [:]
+        guard var p = pickAvailable(format, from: line, choice: choice) else { return nil }
+        p.rematchFallback = true
+        p.note = [p.note, "teams repeated to keep the court playing"].compactMap { $0 }.joined(separator: " · ")
+        return p
+    }
+    private func pickAvailable(_ format: Format, from line: [Player], choice: Int = 0, allowIdleRelease: Bool = false, waitForBusyPartner: Bool = true) -> Pairing? {
+        guard format == .doubles else { return pickCore(format, from: line, choice: choice) }
+        let busy = onCourt, now = Self.now
+        let line = line.filter { p in !(waitForBusyPartner && isLocked(p) && busy.contains(p.lock!) && !splitDue(p.id, p.lock!) && now.timeIntervalSince(waitStart(p)) < Self.lockWait) }
+        var locks = lockContext(line)
+        guard !locks.isEmpty else { return pickCore(format, from: line, choice: choice) }
+        for i in locks.indices where !locks[i].apart {
+            let l = locks[i]
+            if [l.x,l.y].compactMap(player).contains(where: { now.timeIntervalSince(waitStart($0)) >= Self.lockWait }), lockedGame(line,l,locks:locks) == nil { locks[i].apart = true }
+        }
+        var order: [Player] = []
+        for p in line where !order.contains(where: { $0.id == p.id }) {
+            order.append(p)
+            if let l = locks.first(where: { !$0.apart && ($0.x == p.id || $0.y == p.id) }), let mate = player(l.x == p.id ? l.y : l.x) { order.append(mate) }
+        }
+        let real = Dictionary(uniqueKeysWithValues: players.map { ($0.id, matchSkill($0.id)) }), protection = lockProtection(line)
+        func core(_ candidates: [Player]) -> Pairing? {
+            Self.lockCtx = LockCtx(locks: locks, strict: true, real: real, opponents: protection.opponents, rested: protection.rested)
+            defer { Self.lockCtx = nil }
+            guard let p = pickCore(format, from: candidates, choice: choice),
+                  Self.keepsLocks(p.a.map(\.id), p.b.map(\.id), locks, strict: true, real: real, opponents: protection.opponents, rested: protection.rested) else { return nil }
+            return lockNotes(p, locks)
+        }
+        if let p = core(order) { return p }
+        // Search the full queue, preserving rest and game-count protections for the opponents too.
+        for l in locks where !l.apart {
+            if let p = lockedGame(order, l, locks: locks) { return p }
+        }
+        let held = Set(locks.filter { !$0.apart }.flatMap { [$0.x, $0.y] })
+        return core(order.filter { !held.contains($0.id) })
+    }
+
+    func lockProtection(_ line: [Player]) -> (opponents: Set<UUID>, rested: Set<UUID>?) {
+        let counts = gamesCounted, low = line.map { counts[$0.id, default: 0] }.min() ?? 0
+        let off = Set(games.last.map { $0.teamA + $0.teamB } ?? [])
+        let limit = Self.recallLimit(line, games: counts, justOff: off)
+        return (Set(line.filter { counts[$0.id, default: 0] <= low + Self.lockGameLead && (!off.contains($0.id) || counts[$0.id, default: 0] <= limit) }.map(\.id)), nil)
+    }
+
+    /// Opponents within the streak-adjusted locked band from the whole queue; never spend an overplayed player's turn to keep a lock.
+    func lockedGame(_ order: [Player], _ l: LockRule, locks: [LockRule]) -> Pairing? {
+        guard !l.apart, let x = player(l.x), let y = player(l.y) else { return nil }
+        let others = order.filter { $0.id != l.x && $0.id != l.y }, counts = gamesCounted, protection = lockProtection(order)
+        let real = Dictionary(uniqueKeysWithValues: players.map { ($0.id, matchSkill($0.id)) }), history = Self.matchupHistory ?? lastTeamOpponents
+        let off = Set(games.last.map { $0.teamA + $0.teamB } ?? [])
+        var best: (key: [Int], b: [Player])?
+        for j in others.indices.dropFirst() {
+            for i in 0..<j {
+                let a = [x, y], b = [others[i], others[j]]
+                guard Self.rematchAllowed(a.map(\.id),b.map(\.id),history:history), Self.keepsLocks(a.map(\.id), b.map(\.id), locks, strict: true, real: real, opponents: protection.opponents, rested: protection.rested) else { continue }
+                guard skillRangeAllowed((a+b).map(\.id)) else { continue }
+                let gap = unevenness(a.map(\.id), b.map(\.id))
+                let spread = (a+b).map { matchSkill($0.id) }; let range = spread.max()! - spread.min()!
+                let stage = balancedOnly ? 0 : range <= Self.similarSpread + 1e-9 ? 0 : range <= Self.widerSpread + 1e-9 ? 1 : 2
+                let key = [b.map { counts[$0.id, default: 0] }.reduce(0, +), (a+b).filter { off.contains($0.id) }.count, stage, Int((gap * 100).rounded()), i + j]
+                if best.map({ key.lexicographicallyPrecedes($0.key) }) ?? true { best = (key, b) }
+            }
+        }
+        return best.map { lockNotes(Pairing(format: .doubles, a: [x, y], b: $0.b), locks) }
+    }
+
+    /// Explain temporary releases without claiming that cooldown partners must face each other.
+    func lockNotes(_ p: Pairing, _ locks: [LockRule]) -> Pairing {
+        let ids = Set((p.a + p.b).map(\.id))
+        let notes = locks.filter { $0.apart && (ids.contains($0.x) || ids.contains($0.y)) }.map { l in
+            let names = "\(player(l.x)?.name ?? "") & \(player(l.y)?.name ?? "")"
+            if splitDue(l.x, l.y) { return names + " cooldown after 3 wins together" }
+            return names + " released after 30-minute wait"
+        }
+        var q = p
+        if !notes.isEmpty { q.note = ([p.note].compactMap { $0 } + notes).joined(separator: " · ") }
+        return q
+    }
+
+    private func pickCore(_ format: Format, from line: [Player], choice: Int = 0) -> Pairing? {
+        guard matchingMode == .equalSkill else { return pickCoreHead(format, from: line, choice: choice) }
+        for head in line {
+            let order = [head] + line.filter { $0.id != head.id }
+            if let p = pickCoreHead(format, from: order, choice: choice) { return p }
+        }
+        return nil
+    }
+
+    private func pickCoreHead(_ format: Format, from line: [Player], choice: Int = 0) -> Pairing? {
+        // Streaks: matched at the boosted rating; the players handed back carry their real ratings.
+        let line = line.map { p in var q = p; q.skill = matchSkill(p.id, format: format); return q }
         // Wait cap: everyone who has waited past it (up to a full court) plays in this game, even if they're behind in line on
         // games played. Fewest games counted first (a late arrival counts at par, so their missed games don't put them ahead), then longest wait.
-        let waited = { (p: Player) in p.since ?? p.readyAt }
-        let n = gamesCounted
-        let overdue = Array(line.filter { Self.now.timeIntervalSince(waited($0)) >= Self.waitPriority }
-            .sorted { (n[$0.id] ?? 0, waited($0)) < (n[$1.id] ?? 0, waited($1)) }.prefix(format.needed))
+        // Wait clocks run from the session's first game: time before play starts doesn't make anyone overdue.
+        let waited = waitStart, n = gamesCounted
+        let overdue: [Player] = []
         let late = Set(overdue.map(\.id))
         let q = line.filter { !late.contains($0.id) }
         let unplayed = q.filter { played($0.id) == 0 }
@@ -438,122 +781,95 @@ struct SessionState: Codable, Equatable, Identifiable {
             let ids = Set(unplayed.map(\.id))
             pool = unplayed.shuffled(using: &rng) + q.filter { !ids.contains($0.id) }
         }
-        // Ties on fewest games: whoever is hardest to match (fewest similar-level players waiting) heads the game, so the
-        // strongest and weakest aren't left waiting while mid-rated players fill every game. Nobody with more games jumps ahead.
-        if format == .doubles, !fresh, overdue.isEmpty, !balancedOnly, pool.count > 4, pool[0].first != true {
-            let off0 = Set(results.last.map { $0.teamA + $0.teamB } ?? []), low = n[pool[0].id] ?? 0
-            let tier = pool.filter { (n[$0.id] ?? 0) == low && !off0.contains($0.id) && $0.first != true }
-            func similar(_ p: Player) -> Int { pool.filter { $0.id != p.id && abs($0.skill - p.skill) <= Self.similarSpread + 1e-9 }.count }
-            if tier.count > 1, let h = tier.min(by: { similar($0) < similar($1) }) { pool = [h] + pool.filter { $0.id != h.id } }
-        }
         pool = overdue + pool
         let turn = fresh ? 0 : choice
-        let off = Set(results.last.map { $0.teamA + $0.teamB } ?? [])
-        let recent = format == .doubles ? recentPairs() : [:], apart = format == .doubles ? pairsKeptApart() : [], must = max(1, overdue.count)
+        let off = Set(games.last.map { $0.teamA + $0.teamB } ?? [])
+        let recent = format == .doubles ? recentPairs() : [:], must = max(1, overdue.count)
         let balanced = format == .doubles && balancedOnly
         let cap = overdue.isEmpty ? nil : Self.overdueSpread // an overdue game may stretch to 2 levels, balanced, at worst
-        var p = format == .singles ? Self.pickSingles(pool, finishes: results.map(\.end), choice: turn)
-            : Self.pickDoubles(pool, choice: turn, recent: recent, must: must, justOff: off, apart: apart, capSpread: cap, games: n, balancedOnly: balanced)
-        if format == .doubles, allowPairGame, !pairGameOnCourt {
-            // A waiting pair is offered first; shuffle steps through their other options, then on to the normal games.
-            let normal = turn == 0 ? p : Self.pickDoubles(pool, choice: 0, recent: recent, must: must, justOff: off, apart: apart, capSpread: cap, games: n, balancedOnly: balanced)
-            let pairGames = partnerGames(pool, picked: (normal.map { $0.a + $0.b } ?? []) + pool.prefix(4), overdue: overdue, justOff: off)
-            if !pairGames.isEmpty {
-                let total = pairGames.count + (normal?.options ?? 0), k = turn % total
-                p = k < pairGames.count ? pairGames[k] : Self.pickDoubles(pool, choice: k - pairGames.count, recent: recent, must: must, justOff: off, apart: apart, capSpread: cap, games: n, balancedOnly: balanced)
+        // At most 2 late arrivals on their first game in one game, so a wave of arrivals doesn't take over a court.
+        let newIDs = Set(line.filter(isNewcomer).map(\.id))
+        var limitNew = format == .doubles && newIDs.count > Self.latePerGame
+        // Even games: nobody plays while someone with fewer games is left waiting (a late arrival counts at par), so similar-skill
+        // groups don't leave anyone 2 games behind.
+        var even = format == .doubles
+        let finalPool = pool
+        let fewNew = { (four: [Player]) -> Bool in
+            if matchingMode == .equalSkill {
+                let skills = four.map(\.skill)
+                if skills.max()! - skills.min()! > Self.similarSpread + 1e-9 { return false }
+            }
+            if limitNew && four.filter({ newIDs.contains($0.id) }).count > Self.latePerGame { return false }
+            guard even else { return true }
+            let ids = Set(four.map(\.id))
+            guard let low = finalPool.filter({ !ids.contains($0.id) }).map({ n[$0.id] ?? 0 }).min() else { return true }
+            return four.allSatisfy { (n[$0.id] ?? 0) <= low }
+        }
+        func doubles(_ choice: Int) -> Pairing? {
+            // Search the whole waiting line while mixing arrivals, so a wave cannot hide the regulars.
+            Self.pickDoubles(pool, choice: choice, recent: recent, must: must, justOff: off, accept: fewNew, capSpread: cap,
+                             games: n, balancedOnly: balanced, searchLimit: limitNew ? pool.count : 12)
+        }
+        let singlesPool = matchingMode == .equalSkill ? pool.filter { abs($0.skill - (pool.first?.skill ?? $0.skill)) <= Self.singlesRange + 1e-9 } : pool
+        var p = format == .singles ? Self.pickSingles(singlesPool, finishes: results.map(\.end), choice: turn) : doubles(turn)
+        if even && (p == nil || abs(p!.a.map(\.skill).reduce(0,+) - p!.b.map(\.skill).reduce(0,+))/2 > Self.fairGap) {
+            even = false
+            p = doubles(turn) ?? p
+        }
+        if limitNew && (p == nil || abs(p!.a.map(\.skill).reduce(0,+) - p!.b.map(\.skill).reduce(0,+))/2 > Self.fairGap) {
+            limitNew = false
+            p = doubles(turn) ?? p
+        }
+        var forcedHotCold = false
+        // Hot/cold teaming: offered first; shuffle then steps through the normal games.
+        if format == .doubles {
+            let normal = turn == 0 ? p : doubles(0)
+            let skills = normal.map { ($0.a + $0.b).map(\.skill) } ?? []
+            let range = (skills.max() ?? 0) - (skills.min() ?? 0)
+            let stage = normal == nil ? Self.hotColdRange : range <= Self.similarSpread + 1e-9 ? Self.similarSpread : range <= Self.widerSpread + 1e-9 ? Self.widerSpread : Self.hotColdRange
+            if let hc = hotColdGame(pool, picked: (normal.map { $0.a + $0.b } ?? []) + pool.prefix(4), overdue: overdue, justOff: off, maxSpread: stage, accept: fewNew) {
+                let total = 1 + (normal?.options ?? 0), k = turn % total
+                forcedHotCold = k == 0
+                p = k == 0 ? hc : doubles(k - 1)
                 p?.options = total
             }
         }
+        if let game = p, format == .doubles, !forcedHotCold { p = rotateTeams(game, choice: turn) }
         if fresh { p?.options = 99 } // keeps the shuffle button available
-        if !overdue.isEmpty {
-            let who = overdue.map(\.name).formatted(.list(type: .and))
+        // The note names only the overdue players actually in this game.
+        let inGame = overdue.filter { o in Self.now.timeIntervalSince(waited(o)) >= Self.noteAfter && (p.map { ($0.a + $0.b).contains { $0.id == o.id } } ?? false) }
+        if !inGame.isEmpty {
+            let who = inGame.map(\.name).formatted(.list(type: .and))
             let earlier = p?.note
-            p?.note = [earlier, "\(who) waited \(Int(Self.waitPriority / 60))+ min"].compactMap { $0 }.joined(separator: " · ")
+            p?.note = [earlier, "\(who) waited \(Int(Self.noteAfter / 60))+ min"].compactMap { $0 }.joined(separator: " · ")
         }
+        if var g = p { g.a = g.a.map { player($0.id) ?? $0 }; g.b = g.b.map { player($0.id) ?? $0 }; p = g }
         return p
     }
 
-    /// Partner requests: each requested pair plays one game together per session; after that they're like anyone else.
-    /// When one of a waiting pair is about to play (picked anyway, or in the front four) and the other is rested and nearest the
-    /// front (first 8 in line, then 12, then anyone waiting if no even game can be made), they're offered as teammates alongside whoever is
-    /// first in line: up to 3 games with different other players, each with team averages within `pairSlack`. The rating
-    /// range may be wider than usual so far-apart pairs still get their game. Rest first and the overdue rule come first.
-    func partnerGames(_ pool: [Player], picked: [Player], overdue: [Player], justOff: Set<UUID>) -> [Pairing] {
-        guard pairingActive, overdue.count <= 2 else { return [] }
-        let n = gamesCounted
-        for depth in [8, 12, pool.count] { // ponytail: whole line as the last try, once per pair per night
-            let near = pool.prefix(depth)
-            for x in picked where !justOff.contains(x.id) {
-                guard let y = near.first(where: { $0.id == x.partner && $0.partner == x.id }), !justOff.contains(y.id),
-                      pairWaiting(x.id, y.id) else { continue }
-                var recent = recentPairs()
-                for (a, b) in [(x.id, y.id), (y.id, x.id)] { recent[a]?.partners.remove(b); recent[a]?.opponents.remove(b) }
-                // Whoever is first in line plays, as in any game, so nobody is skipped to fit the pair in.
-                var front = overdue
-                for p in pool.prefix(1) + [x, y] where !front.contains(where: { $0.id == p.id }) { front.append(p) }
-                guard front.count <= 4 else { continue }
-                let ids = Set(front.map(\.id))
-                let even = { (four: [Player]) in // and nobody called straight back to fit the pair in
-                    abs(x.skill + y.skill - four.filter { $0.id != x.id && $0.id != y.id }.map(\.skill).reduce(0, +)) / 2 <= Self.pairSlack + 1e-9
-                        && !four.contains { justOff.contains($0.id) }
-                }
-                let otherPairs = requestedPairs.filter { $0 != [x.id, y.id] } // never another requested pair as their opponents
-                var games: [Pairing] = [], used = Set<UUID>()
-                while games.count < 3,
-                      var g = Self.pickDoubles(front + near.filter { !ids.contains($0.id) && !used.contains($0.id) }, choice: 0, recent: recent,
-                                               must: front.count, justOff: justOff, together: [x.id, y.id], apart: otherPairs, accept: even, games: n) {
-                    g.note = nil // kept quiet on screen
-                    games.append(g)
-                    used.formUnion((g.a + g.b).map(\.id).filter { !ids.contains($0) })
-                }
-                if !games.isEmpty { return games }
-            }
+    func rotateTeams(_ p: Pairing, choice: Int) -> Pairing {
+        let all = Self.fairSplits(p.a + p.b).filter { t in
+            guard abs(t.a.map(\.skill).reduce(0,+) - t.b.map(\.skill).reduce(0,+))/2 <= Self.fairGap + 1e-9 else { return false }
+            guard Self.rematchAllowed(t.a.map(\.id),t.b.map(\.id)) else { return false }
+            guard let c = Self.lockCtx else { return true }
+            return Self.keepsLocks(t.a.map(\.id),t.b.map(\.id),c.locks,strict:true,real:c.real,opponents:c.opponents,rested:c.rested)
         }
-        return []
+        func last(_ team: [Player]) -> Int {
+            games.lastIndex { r in [r.teamA,r.teamB].contains { side in team.allSatisfy { side.contains($0.id) } } } ?? -1
+        }
+        let sorted = all.enumerated().sorted { x,y in
+            let a=x.element,b=y.element
+            let gapA=abs(a.a.map(\.skill).reduce(0,+)-a.b.map(\.skill).reduce(0,+)),gapB=abs(b.a.map(\.skill).reduce(0,+)-b.b.map(\.skill).reduce(0,+))
+            return (max(last(a.a),last(a.b)),gapA,x.offset) < (max(last(b.a),last(b.b)),gapB,y.offset)
+        }
+        guard !sorted.isEmpty else { return p }
+        let t=sorted[choice % sorted.count].element
+        var g=p;g.a=t.a;g.b=t.b;g.options=sorted.count;return g
     }
 
-    /// Whether x and y have been teammates in a doubles game this session (on purpose or by chance).
-    func pairPlayed(_ x: UUID, _ y: UUID) -> Bool {
-        results.contains { r in r.teamA.count == 2 && [r.teamA, r.teamB].contains { $0.contains(x) && $0.contains(y) } }
-    }
-
-    /// A requested pair is waiting for its game: not played together yet, and each has played one doubles game this
-    /// session (so never in their first game of the night).
-    func pairWaiting(_ x: UUID, _ y: UUID) -> Bool {
-        let playedDoubles = { (id: UUID) in results.contains { $0.teamA.count == 2 && ($0.teamA + $0.teamB).contains(id) } }
-        return !pairPlayed(x, y) && playedDoubles(x) && playedDoubles(y)
-    }
-
-    /// One team is a requested pair that hadn't played together yet: their pair game.
-    func isPairGame(_ a: [UUID], _ b: [UUID]) -> Bool {
-        [a, b].contains { t in t.count == 2 && player(t[0])?.partner == t[1] && player(t[1])?.partner == t[0] && !pairPlayed(t[0], t[1]) }
-    }
-
-    /// Only one pair game at a time: is one being played now?
-    var pairGameOnCourt: Bool { courts.contains { $0.match.map { isPairGame($0.teamA, $0.teamB) } ?? false } }
-
-    /// Pair requests need enough people: twice the players one full round of courts takes, minus two
-    /// (14 for 2 doubles courts, 22 for 3, 30 for 4; a singles court counts 2). Below that they're kept but on hold.
-    var pairingMinimum: Int { 2 * courts.map(\.format.needed).reduce(0, +) - 2 }
     var activePlayers: Int { players.filter { !$0.paused && $0.away != true }.count } // sitting out and not here don't count
-    var pairingActive: Bool { activePlayers >= pairingMinimum }
-    /// All courts doubles and fewer than 8 players per court here: balanced teams instead of similar-skill groups.
-    var balancedOnly: Bool { courts.allSatisfy { $0.format == .doubles } && activePlayers < 8 * courts.count }
-
-    /// Every requested pair (two-way), whether or not they've played together.
-    var requestedPairs: [Set<UUID>] {
-        players.compactMap { p in
-            guard let q = p.partner, player(q)?.partner == p.id, p.id.uuidString < q.uuidString else { return nil }
-            return [p.id, q]
-        }
-    }
-
-    /// Requested pairs that haven't played together yet: the normal matching won't make them teammates, so their game
-    /// happens only as a planned, even pair game. They can still meet as opponents. After their game they're not listed.
-    func pairsKeptApart() -> [Set<UUID>] {
-        guard pairingActive else { return [] }
-        return requestedPairs.filter { pair in let ids = Array(pair); return !pairPlayed(ids[0], ids[1]) }
-    }
+    /// Explicit mixed-skill mode; Auto retains the original skill stages.
+    var balancedOnly: Bool { matchingMode == .balancedSkill }
 
     /// What an open court would start right now: the game Up Next lined up for it.
     func nextPairing(for court: Court) -> Pairing? { openCourtPairings()[court.id] }
@@ -573,22 +889,24 @@ struct SessionState: Codable, Equatable, Identifiable {
 
     /// Shuffle button: the next option for an open court's "Next up" game.
     mutating func shuffle(_ courtID: UUID) {
-        guard let i = courts.firstIndex(where: { $0.id == courtID }), courts[i].match == nil else { return }
+        guard scheduledOnCourt(courtID) == nil else { return }
+        guard let i = courts.firstIndex(where: { $0.id == courtID }), courts[i].match == nil, courts[i].manual == nil else { return }
         // One run of the matching, only when there's another open court to pin or a locked side to keep.
         let next = courts[i].locked != nil || courts.contains(where: { $0.id != courtID && $0.match == nil }) ? openCourtPairings() : [:]
         // Keep every other court's next game as it is, so only this court changes.
-        let keep = courts.indices.filter { $0 != i }.compactMap { j in
-            next[courts[j].id].map { (j, Match(teamA: $0.a.map(\.id), teamB: $0.b.map(\.id))) }
+        let keep = courts.indices.filter { $0 != i && courts[$0].manual == nil && scheduledOnCourt(courts[$0].id) == nil }.compactMap { j in
+            next[courts[j].id].map { (j, Match(teamA: $0.a.map(\.id), teamB: $0.b.map(\.id), queueOverride: courts[j].plan?.queueOverride)) }
         }
         for (j, m) in keep { courts[j].plan = m }
         if let side = courts[i].locked, let here = next[courts[i].id] {
             // Locked side stays; the other side steps through fair options from the front of the line, rested players first.
             let kept = (side == 0 ? here.a : here.b).map(\.id), current = Set((side == 0 ? here.b : here.a).map(\.id))
-            let busy = Set(kept + keep.flatMap { $0.1.teamA + $0.1.teamB })
-            let off = Set(results.last.map { $0.teamA + $0.teamB } ?? [])
+            let busy = Set(kept + keep.flatMap { $0.1.teamA + $0.1.teamB }).union(scheduledLockedPlayers)
+            let off = Set(games.last.map { $0.teamA + $0.teamB } ?? [])
             let pool = Array(eligible(courts[i].format).filter { !busy.contains($0.id) }.prefix(8).map(\.id)) // ponytail: front 8 only
-            let sides = kept.count == 1 ? pool.map { [$0] }
+            let allSides = kept.count == 1 ? pool.map { [$0] }
                 : pool.indices.flatMap { x in pool.indices.filter { $0 > x }.map { [pool[x], pool[$0]] } }
+            let sides = allSides.filter { skillRangeAllowed(kept + $0) }
             let fair = sides.filter { isEven(kept, $0) }
             let options = (fair.isEmpty ? sides : fair).enumerated()
                 .sorted { ($0.element.filter(off.contains).count, $0.offset) < ($1.element.filter(off.contains).count, $1.offset) }.map(\.element)
@@ -603,22 +921,74 @@ struct SessionState: Codable, Equatable, Identifiable {
 
     /// Locks one side of an open court's "Next up" game (nil unlocks): those players stay, and shuffle changes only the other side.
     mutating func lock(_ side: Int?, on courtID: UUID) {
-        guard let i = courts.firstIndex(where: { $0.id == courtID }), courts[i].match == nil else { return }
+        guard scheduledOnCourt(courtID) == nil else { return }
+        guard let i = courts.firstIndex(where: { $0.id == courtID }), courts[i].match == nil, courts[i].manual == nil else { return }
         if side != nil, let here = nextPairing(for: courts[i]) { courts[i].plan = Match(teamA: here.a.map(\.id), teamB: here.b.map(\.id)) }
         courts[i].locked = side
     }
 
     // MARK: Replacing a player in "Next up"
 
+    // MARK: Manual mode
+
+    /// A manual court's slots (team A, then team B), sized to its format, keeping only players still waiting. nil: automatic.
+    func manualSlots(_ c: Court) -> [UUID?]? {
+        guard tournament == nil, c.match == nil, let m = c.manual else { return nil }
+        let waiting = Set(eligible(c.format).map(\.id))
+        return (0..<c.format.needed).map { k in k < m.count ? m[k].flatMap { waiting.contains($0) ? $0 : nil } : nil }
+    }
+
+    /// Manual mode on (empty slots: the organiser picks every player) or off (back to automatic picks).
+    mutating func setManual(_ on: Bool, on courtID: UUID) {
+        guard scheduledOnCourt(courtID) == nil else { return }
+        guard let i = courts.firstIndex(where: { $0.id == courtID }), courts[i].match == nil else { return }
+        courts[i].manual = on ? Array(repeating: nil, count: courts[i].format.needed) : nil
+        courts[i].plan = nil; courts[i].locked = nil; courts[i].shuffles = nil
+    }
+
+    /// Puts a player in a manual slot (nil empties it); they leave any other manual slot they were in.
+    mutating func setSlot(_ slot: Int, to id: UUID?, on courtID: UUID) {
+        guard scheduledOnCourt(courtID) == nil, id.map({ !scheduledLockedPlayers.contains($0) }) ?? true else { return }
+        guard let i = courts.firstIndex(where: { $0.id == courtID }), manualSlots(courts[i]) != nil else { return }
+        if let id { for j in courts.indices { courts[j].manual = courts[j].manual?.map { $0 == id ? nil : $0 } } }
+        var m = manualSlots(courts[i])!
+        guard m.indices.contains(slot) else { return }
+        m[slot] = id
+        courts[i].manual = m
+    }
+
     /// A hand-set lineup that still stands: right size, everyone still waiting and able to play this format.
     func validPlan(_ c: Court) -> Match? {
         guard tournament == nil, c.match == nil, let p = c.plan, p.teamA.count + p.teamB.count == c.format.needed else { return nil }
+        guard p.queueOverride == true || skillRangeAllowed(p.teamA + p.teamB) else { return nil }
         let waiting = Set(eligible(c.format).map(\.id))
-        return (p.teamA + p.teamB).allSatisfy(waiting.contains) ? p : nil
+        return (p.teamA + p.teamB).allSatisfy(waiting.contains) && automaticMatchupAllowed(p.teamA,p.teamB) ? p : nil
     }
 
     /// How uneven a lineup is: rating gap in singles, gap between team averages in doubles.
-    func unevenness(_ a: [UUID], _ b: [UUID]) -> Double { abs(averageSkill(a) - averageSkill(b)) }
+    func unevenness(_ a: [UUID], _ b: [UUID]) -> Double { abs(averageMatchSkill(a) - averageMatchSkill(b)) }
+
+    /// Matching caps at 5.0; strict mode restores saved ratings when a loss penalty prevents a skill group.
+    func matchSkill(_ id: UUID, format: Format = .doubles) -> Double {
+        guard let p = player(id) else { return 3 }
+        let boost = streakBoost(id), adjusted = min(5, p.skill + boost)
+        guard matchingMode == .equalSkill, boost < 0 else { return adjusted }
+        // Include players on court so starting a preview cannot change its rating basis.
+        let peers = players.filter { $0.id != id && !$0.paused && $0.away != true && ($0.pref == .any || $0.pref.rawValue == format.rawValue) }
+        let ratings = (peers.map { min(5, $0.skill + streakBoost($0.id)) } + [adjusted]).sorted()
+        if ratings.count >= format.needed {
+            for i in 0...(ratings.count - format.needed) {
+                let low = ratings[i], high = ratings[i + format.needed - 1]
+                if low <= adjusted + 1e-9 && high >= adjusted - 1e-9 && high - low <= Self.similarSpread + 1e-9 { return adjusted }
+            }
+        }
+        return min(5, p.skill)
+    }
+    func averageMatchSkill(_ ids: [UUID]) -> Double {
+        let format: Format = ids.count == 1 ? .singles : .doubles
+        let skills = ids.filter { player($0) != nil }.map { matchSkill($0, format: format) }
+        return skills.isEmpty ? 3 : skills.reduce(0, +) / Double(skills.count)
+    }
 
     func isEven(_ a: [UUID], _ b: [UUID]) -> Bool {
         unevenness(a, b) <= (a.count == 1 ? Self.singlesRange : Self.fairGap) + 0.001
@@ -627,7 +997,7 @@ struct SessionState: Codable, Equatable, Identifiable {
     /// Doubles teams as given if they're even, otherwise the fairest way to split those four.
     func arranged(_ a: [UUID], _ b: [UUID]) -> (a: [UUID], b: [UUID]) {
         guard a.count == 2, !isEven(a, b) else { return (a, b) }
-        let four = players(a + b)
+        let four = players(a + b).map { p in var q = p; q.skill = matchSkill(p.id); return q }
         guard four.count == 4 else { return (a, b) }
         let best = Self.fairSplits(four)[0]
         return (best.a.map(\.id), best.b.map(\.id))
@@ -648,7 +1018,7 @@ struct SessionState: Codable, Equatable, Identifiable {
         for o in courts where o.id != courtID {
             for p in nextPairing(for: o).map({ $0.a + $0.b }) ?? [] { linedUp[p.id] = o.name }
         }
-        return eligible(c.format).filter { !inGame.contains($0.id) }.map { p in
+        return eligible(c.format).filter { !inGame.contains($0.id) && !scheduledLockedPlayers.contains($0.id) }.map { p in
             let l = swapped(here, out, p.id)
             return (p, isEven(l.a, l.b), linedUp[p.id])
         }
@@ -666,11 +1036,12 @@ struct SessionState: Codable, Equatable, Identifiable {
     /// that court gets the longest-rested player who keeps it even (or the least uneven one if nobody does),
     /// and the result is returned so the organiser can accept or undo it.
     mutating func replace(_ out: UUID, with incoming: UUID, on courtID: UUID) -> KnockOn? {
+        guard scheduledOnCourt(courtID) == nil, !scheduledLockedPlayers.contains(incoming) else { return nil }
         guard let i = courts.firstIndex(where: { $0.id == courtID }), let here = nextPairing(for: courts[i]) else { return nil }
         let other = courts.first { $0.id != courtID && (nextPairing(for: $0).map { ($0.a + $0.b).contains { $0.id == incoming } } ?? false) }
         let otherLineup = other.flatMap { nextPairing(for: $0) }
         let mine = swapped(here, out, incoming)
-        courts[i].plan = Match(teamA: mine.a, teamB: mine.b)
+        courts[i].plan = Match(teamA: mine.a, teamB: mine.b, queueOverride: true)
         courts[i].shuffles = nil
 
         guard let o = other, let ol = otherLineup, let j = courts.firstIndex(where: { $0.id == o.id }) else { return nil }
@@ -682,7 +1053,7 @@ struct SessionState: Codable, Equatable, Identifiable {
             courts[j].plan = nil
             return KnockOn(court: o.name, lost: lost, incoming: nil, even: false)
         }
-        courts[j].plan = Match(teamA: pick.1.a, teamB: pick.1.b)
+        courts[j].plan = Match(teamA: pick.1.a, teamB: pick.1.b, queueOverride: true)
         courts[j].shuffles = nil
         return KnockOn(court: o.name, lost: lost, incoming: pick.0.name, even: isEven(pick.1.a, pick.1.b))
     }
@@ -707,28 +1078,42 @@ struct SessionState: Codable, Equatable, Identifiable {
         let open = courts.enumerated().filter { $0.element.match == nil }
             .sorted { (rank($0.element.format), $0.offset) < (rank($1.element.format), $1.offset) }
             .map(\.element)
-        // Hand-set lineups come first and their players are off limits to the automatic picks.
-        var taken = Set(open.compactMap(validPlan).flatMap { $0.teamA + $0.teamB })
-        // One pair game at a time: once one is lined up (or set by hand), the other courts get normal games.
-        var pairLined = open.compactMap(validPlan).contains { isPairGame($0.teamA, $0.teamB) }
+        // Hand-set lineups and players chosen for manual courts come first; they're off limits to the automatic picks.
+        var taken = Set(open.compactMap(validPlan).flatMap { $0.teamA + $0.teamB } + open.flatMap { manualSlots($0)?.compactMap { $0 } ?? [] })
+        var booked = taken
+        let reservation = scheduledReservation
+        let reserved = Set(reservation.map { $0.teamA + $0.teamB } ?? [])
+        var borrowed = reservation?.idleReleased == true
+        let scheduledCourt = reservation.flatMap { r in reserved.isDisjoint(with: onCourt.union(taken)) ? open.first { $0.format == r.format && $0.manual == nil && validPlan($0) == nil && (r.assignedCourt == nil || $0.id == r.assignedCourt) } : nil }
+        taken.formUnion(reserved)
         var out: [Pairing] = open.compactMap { c in
+            if let m = manualSlots(c) { // manual: the chosen lineup once every slot is filled, never shuffled
+                let ids = m.compactMap { $0 }
+                guard ids.count == m.count else { return nil }
+                return Pairing(format: c.format, a: players(Array(ids[..<(ids.count / 2)])), b: players(Array(ids[(ids.count / 2)...])), court: c.id)
+            }
             if let plan = validPlan(c) {
                 return Pairing(format: c.format, a: players(plan.teamA), b: players(plan.teamB), court: c.id, options: 2) // shuffle returns to automatic
             }
-            guard var p = pick(c.format, from: lines[c.format]!.filter { !taken.contains($0.id) }, choice: c.shuffles ?? 0,
-                               allowPairGame: !pairLined) else { return nil }
+            if let r = reservation, c.id == scheduledCourt?.id {
+                return Pairing(format: c.format, a: players(r.teamA), b: players(r.teamB), court: c.id, scheduled: r.id, note: "Scheduled")
+            }
+            var candidate = pick(c.format, from: lines[c.format]!.filter { !taken.contains($0.id) }, choice: c.shuffles ?? 0, allowIdleRelease: true)
+            if candidate == nil, reservation != nil, scheduledCourt == nil, !borrowed {
+                candidate = pick(c.format, from: lines[c.format]!.filter { !booked.contains($0.id) }, choice: c.shuffles ?? 0, allowIdleRelease: true)
+                if var p = candidate { borrowed = true; p.note = ([p.note].compactMap { $0 } + ["scheduled hold relaxed to avoid an idle court"]).joined(separator: " · "); candidate = p }
+            }
+            guard var p = candidate else { return nil }
             p.court = c.id
-            (p.a + p.b).forEach { taken.insert($0.id) }
-            if isPairGame(p.a.map(\.id), p.b.map(\.id)) { pairLined = true }
+            (p.a + p.b).forEach { taken.insert($0.id); booked.insert($0.id) }
             return p
         }
         // Busy courts: who's next there once the current game ends, earliest-started court first.
         // ponytail: a guess from who's waiting now; the players coming off other courts can change it
         for c in courts.filter({ $0.match != nil }).sorted(by: { $0.match!.start < $1.match!.start }) {
-            guard var p = pick(c.format, from: lines[c.format]!.filter { !taken.contains($0.id) }, choice: 0, allowPairGame: !pairLined) else { continue }
+            guard var p = pick(c.format, from: lines[c.format]!.filter { !taken.contains($0.id) }, choice: 0) else { continue }
             p.court = c.id
             (p.a + p.b).forEach { taken.insert($0.id) }
-            if isPairGame(p.a.map(\.id), p.b.map(\.id)) { pairLined = true }
             out.append(p)
         }
         return out
@@ -745,15 +1130,35 @@ struct SessionState: Codable, Equatable, Identifiable {
     var queue: [Player] {
         let busy = onCourt
         let n = gamesCounted
-        let off = Set(results.last.map { $0.teamA + $0.teamB } ?? [])
+        let off = Set(games.last.map { $0.teamA + $0.teamB } ?? [])
         let key = { (p: Player) in (p.first == true ? 0 : 1, off.contains(p.id) ? 1 : 0, n[p.id] ?? 0, p.readyAt) }
         return players.filter { !busy.contains($0.id) && $0.away != true }.sorted { key($0) < key($1) }
     }
 
     /// Games played plus any arrival credit: what "fewest games first" compares.
+    var scheduledPenalties: [UUID: Int] {
+        var n: [UUID: Int] = [:]
+        for r in games {
+            for id in r.teamA + r.teamB {
+                if r.scheduled != nil && (r.jumpers ?? []).contains(id) { n[id] = 2 }
+                else if r.scheduled == nil { n[id] = max(0, n[id, default: 0] - 1) }
+            }
+        }
+        return n
+    }
+    func scheduledJumpers(_ ids: [UUID]) -> [UUID] {
+        let ready = scheduledReservation?.readyJumpers ?? []
+        return ids.filter { ready.contains($0) }
+    }
+    func scheduledNeedsOrdinary(_ id: UUID) -> Bool {
+        let last = games.last { ($0.teamA + $0.teamB).contains(id) }
+        return last?.scheduled != nil && scheduledPenalties[id, default: 0] > 0
+    }
+
     var gamesCounted: [UUID: Int] {
         var n = Dictionary(uniqueKeysWithValues: players.map { ($0.id, $0.credit ?? 0) })
-        for r in results { for id in r.teamA + r.teamB where n[id] != nil { n[id]! += 1 } }
+        for r in games { for id in r.teamA + r.teamB where n[id] != nil { n[id]! += 1 } }
+        for (id, penalty) in scheduledPenalties where n[id] != nil { n[id]! += penalty }
         return n
     }
 
@@ -765,7 +1170,7 @@ struct SessionState: Codable, Equatable, Identifiable {
 
     // MARK: Stats
 
-    func played(_ id: UUID) -> Int { results.filter { ($0.teamA + $0.teamB).contains(id) }.count }
+    func played(_ id: UUID) -> Int { games.filter { ($0.teamA + $0.teamB).contains(id) }.count }
 
     func wins(_ id: UUID) -> Int {
         results.filter { r in r.winner.map { ($0 == 0 ? r.teamA : r.teamB).contains(id) } ?? false }.count
@@ -777,18 +1182,54 @@ struct SessionState: Codable, Equatable, Identifiable {
         if let i = players.firstIndex(where: { $0.id == id }) { change(&players[i]) }
     }
 
-    mutating func fill(_ courtID: UUID, at now: Date = Date()) {
-        guard let i = courts.firstIndex(where: { $0.id == courtID }),
-              let p = nextPairing(for: courts[i]) else { return }
-        courts[i].match = Match(teamA: p.a.map(\.id), teamB: p.b.map(\.id), start: now, tournamentMatch: p.match)
+    /// Start: begins `shown` (the game the screen drew for this court) while all four are still free, so the lineup never
+    /// changes on Start. The screen redraws only on a change, but who's overdue moves with the clock. Otherwise Up Next now.
+    mutating func fill(_ courtID: UUID, shown: Pairing? = nil, at now: Date = Date()) {
+        guard let i = courts.firstIndex(where: { $0.id == courtID }), courts[i].match == nil else { return }
+        refreshSchedule()
+        guard isLive else { return }
+        let free = Set(queue.map(\.id))
+        guard let p = shown.flatMap({ g in (g.a + g.b).allSatisfy { free.contains($0.id) } ? g : nil }) ?? nextPairing(for: courts[i]) else { return }
+        if tournament == nil, p.scheduled == nil, courts[i].manual == nil, courts[i].plan?.queueOverride != true, !skillRangeAllowed((p.a+p.b).map(\.id)) { return }
+        if tournament == nil, p.scheduled == nil, courts[i].manual == nil, !automaticMatchupAllowed(p.a.map(\.id),p.b.map(\.id)) { courts[i].plan = nil; courts[i].shuffles = nil; return }
+        if let assigned = scheduledOnCourt(courtID), assigned.id != p.scheduled { return }
+        if let id = p.scheduled {
+            guard let current = queueUpNext.first(where: { $0.court == courtID && $0.scheduled == id }), current.a.map(\.id) == p.a.map(\.id), current.b.map(\.id) == p.b.map(\.id) else { return }
+        } else if let r = scheduledReservation, (p.a + p.b).contains(where: { (r.teamA + r.teamB).contains($0.id) }) {
+            guard let allowed = queueUpNext.first(where: { $0.court == courtID && $0.scheduled == nil }), allowed.a.map(\.id) == p.a.map(\.id), allowed.b.map(\.id) == p.b.map(\.id) else { return }
+        }
+        if p.scheduled == nil, let held = scheduledReservation, (p.a + p.b).contains(where: { (held.teamA + held.teamB).contains($0.id) }), let ri = scheduled?.firstIndex(where: { $0.id == held.id }) { scheduled![ri].idleReleased = true }
+        courts[i].match = Match(teamA: p.a.map(\.id), teamB: p.b.map(\.id), start: now, scheduled: p.scheduled, jumpers: p.scheduled == nil ? nil : scheduledJumpers((p.a + p.b).map(\.id)), tournamentMatch: p.match)
         courts[i].shuffles = nil
         courts[i].plan = nil
         courts[i].locked = nil
+        refreshSchedule()
     }
 
-    mutating func fillAll() { courts.map(\.id).forEach { fill($0) } }
+    mutating func fillAll(shown: [UUID: Pairing] = [:]) { courts.map(\.id).forEach { fill($0, shown: shown[$0]) } }
 
-    /// Ends the game on a court. With a winner (0 = team A, 1 = team B), moves both teams' ratings.
+    /// End Session: games still on court are cancelled, then the session is marked ended.
+    mutating func end(at now: Date = Date()) {
+        for c in courts where c.match != nil { finish(c.id, winner: nil, at: now) }
+        ended = now
+        normalizeEnd(); refreshSchedule()
+    }
+
+    mutating func reopen() { ended = nil }
+
+    /// All Players edits: renames and re-rates this person (matched by name, ignoring case) in every session but `except`.
+    /// `skill` nil keeps their ratings. Games already played keep the rating changes they recorded.
+    static func editEverywhere(name old: String, to new: String, skill: Double? = nil, in sessions: inout [SessionState], except: UUID? = nil) {
+        for i in sessions.indices where sessions[i].id != except {
+            for j in sessions[i].players.indices where sessions[i].players[j].name.lowercased() == old.lowercased() {
+                sessions[i].players[j].name = new
+                if let skill { sessions[i].players[j].skill = skill }
+            }
+        }
+    }
+
+    /// Ends the game on a court. With a winner (0 = team A, 1 = team B), moves both teams' ratings. Without one the game is
+    /// cancelled: it's kept in the history, but like Undo Start the players are back exactly where they were in line.
     mutating func finish(_ courtID: UUID, winner: Int?, at now: Date = Date()) {
         guard let i = courts.firstIndex(where: { $0.id == courtID }), let m = courts[i].match else { return }
         var r = GameResult(teamA: m.teamA, teamB: m.teamB, winner: winner, court: courts[i].name, start: m.start, end: now)
@@ -797,22 +1238,47 @@ struct SessionState: Codable, Equatable, Identifiable {
             if let winner { recordTournament(tm, winner: winner) } // "No result" leaves the game to be replayed
         }
         if let winner {
-            // Game length is a nudge: a quick (one-sided) game moves ratings up to 5% more, a long, close one up to 5% less.
-            let lengths = results.filter { $0.teamA.count == m.teamA.count }.map(\.length) + [r.length]
-            let s = Self.speed(r.length, among: lengths)
-            let d = Self.ratingChange(teamA: averageSkill(m.teamA), teamB: averageSkill(m.teamB), aWon: winner == 0) * (1 + 0.05 * s)
+            // A win is a win: game length isn't counted (games to 11 and to 21 last very different times).
+            let d = Self.ratingChange(teamA: averageSkill(m.teamA), teamB: averageSkill(m.teamB), aWon: winner == 0)
             r.changes = adjust(m.teamA, by: d).merging(adjust(m.teamB, by: -d)) { $1 }
         }
+        r.scheduled = m.scheduled; r.jumpers = m.jumpers
         results.append(r)
-        for (n, id) in (m.teamA + m.teamB).enumerated() {
+        for (n, id) in (m.teamA + m.teamB).enumerated() where winner != nil {
             update(id) { $0.readyAt = now.addingTimeInterval(Double(n) * 0.001); $0.first = nil; $0.since = now }
         }
         courts[i].match = nil
+        refreshSchedule()
+        if winner != nil { courts[i].manual = nil } // a finished game ends manual mode; a cancelled one keeps the lineup, like Undo Start
     }
 
     /// Removes a game entered by mistake and undoes its rating change.
     mutating func deleteResult(at i: Int) {
         for (id, c) in results.remove(at: i).changes ?? [:] { update(id) { $0.skill -= c } }
+        normalizeEnd(); refreshSchedule()
+    }
+
+    /// Corrects a finished game's result (0 = team A won, 1 = team B, nil = cancelled): undoes the rating change it made,
+    /// then applies the corrected one, worked out as when a game finishes. Places in line aren't touched.
+    mutating func setWinner(_ i: Int, _ winner: Int?) {
+        guard results.indices.contains(i), results[i].winner != winner else { return }
+        for (id, c) in results[i].changes ?? [:] { update(id) { $0.skill -= c } }
+        results[i].changes = nil
+        results[i].winner = winner
+        normalizeEnd()
+        guard let winner else { return }
+        let r = results[i]
+        let d = Self.ratingChange(teamA: averageSkill(r.teamA), teamB: averageSkill(r.teamB), aWon: winner == 0)
+        results[i].changes = adjust(r.teamA, by: d).merging(adjust(r.teamB, by: -d)) { $1 }
+    }
+
+    // ponytail: 75% of the median games played; tune if late arrivals or early leavers are still ranked (or too many aren't)
+    static let rankShare = 0.75
+    /// Standings rank only players with at least this many games: 75% of the session's typical night (the median among
+    /// those who played), so someone who played a few games and left can't top the table.
+    var rankingMinimum: Int {
+        let n = players.map { played($0.id) }.filter { $0 > 0 }.sorted()
+        return n.isEmpty ? 1 : max(1, Int((Double(n[n.count / 2]) * Self.rankShare).rounded(.up)))
     }
 
     // MARK: Ratings
@@ -821,6 +1287,85 @@ struct SessionState: Codable, Equatable, Identifiable {
     // at which the stronger side is expected to win ~90%. Tune these two if ratings move too fast or too slow.
     static let ratingK = 0.3
     static let ratingSpread = 2.0
+    // ponytail: how fast ratings settle (chosen by simulation): a new player's first `newGames` games move `newK` times as much,
+    // a regular's `regK` times
+    static let newGames = 8, newK = 1.5, regK = 0.75
+    // Streaks (matching only): 3 wins in a row counts as 0.5 higher, each further win 0.5 more, at most 1.5; losses the same, lower.
+    static let streakLength = 3, streakStart = 0.5, streakStep = 0.5, streakMax = 1.5
+    // ponytail: hot/cold teaming, chosen by simulation: partners within 1.0 level, teams within 0.25, all four within 2 levels
+    static let hotColdGap = 1.0, hotColdSlack = 0.25, hotColdRange = 2.0
+    static let lateFirst = 4, latePerGame = 2 // late arrivals go first while fewer than 4 are waiting; at most 2 in a game
+    static let noteAfter: TimeInterval = 25 * 60 // the court names someone overdue only once they've waited this long
+    static let lateAfter: TimeInterval = 30 * 60 // arrivals in the first 30 minutes after the first game count as on time (no credit)
+    static let lockWait: TimeInterval = 30 * 60
+    static let lockLower = 0.5, lockHigher = 1.25
+    static let lockEqual = 0.5 // locked teammates: opponents' average at least the pair's (within display rounding)
+    // ponytail: chosen by simulation: similar-skill groups from 6.25 players per doubles court (13 for 2 courts, 19 for 3, 25 for 4);
+    // fewer, balanced teams. evenRepeat: an even-games pick that repeats this much (all four met lately) gives way.
+    static let balancedBelow = 6.25, evenRepeat = 6
+
+    /// How much one game moves a rating: more over a new player's first games, less for regulars (anyone without a count).
+    func kFactor(_ id: UUID) -> Double {
+        guard let r = player(id)?.rated, r + played(id) < Self.newGames else { return Self.regK }
+        return Self.newK
+    }
+
+    /// Matching only: +0.5 on 3 wins in a row, +0.5 more per further win, at most +1.5; losses the same, negative. A cancelled
+    /// game doesn't count. Ratings don't change.
+    func streakBoost(_ id: UUID) -> Double {
+        var run = 0, sign = 0
+        for r in games.reversed() where r.teamA.contains(id) || r.teamB.contains(id) {
+            guard let w = r.winner else { continue }
+            let s = (w == 0 ? r.teamA : r.teamB).contains(id) ? 1 : -1
+            if sign != 0 && s != sign { break }
+            sign = s; run += 1
+        }
+        return run >= Self.streakLength ? Double(sign) * min(Self.streakMax, Self.streakStart + Self.streakStep * Double(run - Self.streakLength)) : 0
+    }
+
+    /// Hot/cold teaming: when someone on a win streak (or losing streak) is about to play and someone on the opposite streak within
+    /// 1.0 level is resting near the front (first 8, then 12), they're teammates, against even opponents (teams within 0.25, all four
+    /// within 2 levels). The first in line still plays and nobody is called straight back. No court note.
+    func hotColdGame(_ pool: [Player], picked: [Player], overdue: [Player], justOff: Set<UUID>, maxSpread: Double = Self.hotColdRange, accept: ([Player]) -> Bool = { _ in true }) -> Pairing? {
+        guard overdue.count <= 2 else { return nil }
+        let n = gamesCounted
+        func sign(_ id: UUID) -> Int { let b = streakBoost(id); return b > 0 ? 1 : b < 0 ? -1 : 0 }
+        func real(_ p: Player) -> Double { p.skill } // the line carries ratings with streak boosts
+        for depth in [8, 12] {
+            let near = Array(pool.prefix(depth))
+            for x in picked {
+                let sx = sign(x.id)
+                guard sx != 0, !justOff.contains(x.id) else { continue }
+                let ys = near.enumerated()
+                    .filter { $0.element.id != x.id && sign($0.element.id) == -sx && !justOff.contains($0.element.id) && abs(real($0.element) - real(x)) <= Self.hotColdGap + 1e-9 }
+                    .sorted { (abs(real($0.element) - real(x)), $0.offset) < (abs(real($1.element) - real(x)), $1.offset) }.map(\.element)
+                for y in ys {
+                    var front = overdue
+                    for p in Array(pool.prefix(1)) + [x, y] where !front.contains(where: { $0.id == p.id }) { front.append(p) }
+                    guard front.count <= 4 else { continue }
+                    let ids = Set(front.map(\.id))
+                    let ok = { (four: [Player]) -> Bool in
+                        let others = four.filter { $0.id != x.id && $0.id != y.id }.map(\.skill).reduce(0, +), sk = four.map(real)
+                        return accept(four) && abs(x.skill + y.skill - others) / 2 <= Self.hotColdSlack + 1e-9 && !four.contains { justOff.contains($0.id) }
+                            && sk.max()! - sk.min()! <= maxSpread + 1e-9
+                    }
+                    if var g = Self.pickDoubles(front + near.filter { !ids.contains($0.id) }, choice: 0, recent: recentPairs(), must: front.count, justOff: justOff,
+                                                together: [x.id, y.id], accept: ok, games: n) {
+                        g.note = nil
+                        return g
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// A late arrival who hasn't played since arriving.
+    func isNewcomer(_ p: Player) -> Bool {
+        guard played(p.id) == 0 else { return false }
+        guard let arrival = p.since, let start = started else { return (p.credit ?? 0) > 0 }
+        return arrival.timeIntervalSince(start) >= Self.lateAfter
+    }
 
     /// Rating change for each team A player (team B gets the negative). Winners always gain;
     /// beating a stronger side moves ratings more than beating a weaker one.
@@ -829,29 +1374,12 @@ struct SessionState: Codable, Equatable, Identifiable {
         return ratingK * ((aWon ? 1 : 0) - expectedA)
     }
 
-    /// How one-sided a game looked from its length: +1 for half the usual time or less, 0 for the usual time,
-    /// −1 for half again the usual time or more. Usual is the median length of `lengths`.
-    static func speed(_ length: TimeInterval, among lengths: [TimeInterval]) -> Double {
-        let median = lengths.sorted()[lengths.count / 2]
-        return median > 0 ? min(1, max(-1, (median - length) / (median / 2))) : 0
-    }
-
-    /// `speed` for a finished game, against this session's games of the same format.
-    func speed(of r: GameResult) -> Double {
-        Self.speed(r.length, among: results.filter { $0.teamA.count == r.teamA.count }.map(\.length))
-    }
-
-    /// Standings score, 0–100. A win counts 0.93–1.0 and a loss 0–0.1, more for a quicker (more one-sided) game,
-    /// so records decide it and game length mostly breaks near-ties. Everyone starts with two extra wins and two extra
-    /// losses so one or two lucky games can't top the table. "No result" doesn't count.
+    /// Standings score, 0–100: the win rate with two extra wins and two extra losses, so one or two lucky games can't top
+    /// the table. Game length doesn't count. Equal records score exactly the same, a draw. A cancelled game doesn't count.
     func score(_ id: UUID) -> Double {
-        var credit = 2.0, games = 4.0
-        for r in results where r.winner != nil && (r.teamA + r.teamB).contains(id) {
-            let s = speed(of: r)
-            credit += (r.winner == 0 ? r.teamA : r.teamB).contains(id) ? 0.965 + 0.035 * s : 0.05 - 0.05 * s
-            games += 1
-        }
-        return credit / games * 100
+        let mine = games.filter { ($0.teamA + $0.teamB).contains(id) }
+        let won = mine.filter { ($0.winner == 0 ? $0.teamA : $0.teamB).contains(id) }.count
+        return Double(won + 2) / Double(mine.count + 4) * 100
     }
 
     func averageSkill(_ ids: [UUID]) -> Double {
@@ -863,21 +1391,99 @@ struct SessionState: Codable, Equatable, Identifiable {
     mutating func adjust(_ ids: [UUID], by d: Double) -> [UUID: Double] {
         var applied: [UUID: Double] = [:]
         for id in ids {
+            let k = kFactor(id)
             update(id) { p in
                 let old = p.skill
-                p.skill = min(5, max(1, old + d))
+                p.skill = min(5, max(1, old + d * k))
                 applied[id] = p.skill - old
             }
         }
         return applied
     }
 
-    /// Sets (or clears, with nil) a two-way partner request, ending any request either player had with someone else.
-    mutating func setPartner(_ id: UUID, _ other: UUID?) {
-        for i in players.indices where [id, other].contains(players[i].id) || [id, other].contains(players[i].partner) {
-            players[i].partner = nil
+    // MARK: Locked teammates
+    // A lock preserves the team only while rating, rest and game-count protections allow it.
+    // Overdue unmatchable pairs and three-win cooldown partners can be selected independently.
+
+    struct LockRule { var x: UUID, y: UUID, apart: Bool; var idle = false; var blockedTeams: [Set<UUID>] = [] }
+    struct LockCtx { var locks: [LockRule], strict: Bool, real: [UUID: Double]; var opponents: Set<UUID>? = nil; var rested: Set<UUID>? = nil }
+    static var lockCtx: LockCtx? // during a doubles pick, read by bestFour and the overdue rule
+
+    /// Every locked pair (two-way), once.
+    var lockedPairs: [(UUID, UUID)] {
+        players.compactMap { p in
+            guard let q = p.lock, player(q)?.lock == p.id, p.id.uuidString < q.uuidString else { return nil }
+            return (p.id, q)
         }
-        if let other { update(id) { $0.partner = other }; update(other) { $0.partner = id } }
+    }
+    func isLocked(_ p: Player) -> Bool { p.lock.flatMap(player)?.lock == p.id }
+
+    /// Wins in a row the pair has as teammates, counted back from their latest game.
+    func lockStreak(_ x: UUID, _ y: UUID) -> Int {
+        var n = 0
+        for r in games.reversed() where (r.teamA + r.teamB).contains(x) {
+            let team = r.teamA.contains(x) ? r.teamA : r.teamB
+            guard team.contains(y), (r.winner == 0 ? r.teamA : r.teamB) == team else { break }
+            n += 1
+        }
+        return n
+    }
+    func splitDue(_ x: UUID, _ y: UUID) -> Bool { max(lockStreak(x, y), lockStreak(y, x)) >= Self.streakLength }
+
+    /// Sets (or clears, with nil) a lock, ending any lock either player had.
+    mutating func setLock(_ id: UUID, _ other: UUID?) {
+        for i in players.indices where [id, other].contains(players[i].id) || (players[i].lock != nil && [id, other].contains(players[i].lock)) {
+            players[i].lock = nil
+        }
+        if let other, player(id) != nil, player(other) != nil {
+            update(id) { $0.lock = other }; update(other) { $0.lock = id }
+        }
+    }
+
+    /// The locked pairs with both partners in this line, each with whoever is first in line as `x` (same order as the web version).
+    func lockedRematchBlocked(_ a: [UUID], _ b: [UUID]) -> Bool {
+        let history = games, own = Set(a), opp = Set(b)
+        guard let last = history.lastIndex(where: { r in
+            (Set(r.teamA) == own && Set(r.teamB) == opp) || (Set(r.teamA) == opp && Set(r.teamB) == own)
+        }) else { return false }
+        let later = history.dropFirst(last + 1)
+        return (a + b).contains { id in later.filter { ($0.teamA + $0.teamB).contains(id) }.count < Self.lockRematchGames }
+    }
+
+    func lockContext(_ line: [Player]) -> [LockRule] {
+        let at = { (id: UUID) in line.firstIndex { $0.id == id } }
+        return lockedPairs.compactMap { x, y in
+            guard let ix = at(x), let iy = at(y) else { return nil }
+            var rule = ix <= iy ? LockRule(x: x, y: y, apart: splitDue(x, y)) : LockRule(x: y, y: x, apart: splitDue(x, y))
+            rule.blockedTeams = lockedPairs.compactMap { u, v in
+                guard u != x && u != y && lockedRematchBlocked([x,y],[u,v]) else { return nil }
+                return Set([u,v])
+            }
+            return rule
+        }.sorted { at($0.x)! < at($1.x)! }
+    }
+
+    /// Both partners of a normal lock in the game, or neither; cooldown partners are selected independently.
+    static func lockMembers(_ ids: [UUID], _ locks: [LockRule]) -> Bool { locks.allSatisfy { $0.apart || ids.contains($0.x) == ids.contains($0.y) } }
+
+    /// A lineup keeps the locks: together, or individually during a cooldown (never as teammates), and when strict
+    /// against a team within the locked band, using streak-adjusted ratings for both sides.
+    static func keepsLocks(_ a: [UUID], _ b: [UUID], _ locks: [LockRule], strict: Bool, real: [UUID: Double], opponents: Set<UUID>? = nil, rested: Set<UUID>? = nil) -> Bool {
+        let avg = { (t: [UUID]) in t.map { real[$0] ?? 3 }.reduce(0, +) / Double(max(1, t.count)) }
+        if let rested, !(a + b).allSatisfy(rested.contains) { return false }
+        for l in locks {
+            let inA = [l.x, l.y].filter(a.contains).count, inB = [l.x, l.y].filter(b.contains).count
+            if inA == 0 && inB == 0 { continue }
+            if !l.apart && (inA + inB == 1 || inA == 1) { return false }
+            if l.apart && (inA == 2 || inB == 2) { return false }
+            if !l.apart {
+                let (own, opp) = inA > 0 ? (a, b) : (b, a)
+                if l.blockedTeams.contains(Set(opp)) { return false }
+                if let opponents, !(own + opp).allSatisfy(opponents.contains) { return false }
+                if strict && (avg(opp) < avg(own) - lockLower - 1e-9 || avg(opp) > avg(own) + lockHigher + 1e-9) { return false }
+            }
+        }
+        return true
     }
 
     mutating func moveToFront(_ id: UUID) {
@@ -895,7 +1501,7 @@ struct SessionState: Codable, Equatable, Identifiable {
         let here = Set(players.map { $0.name.lowercased() })
         var latest: [String: Player] = [:]
         for session in past.sorted(by: { $0.date < $1.date }) {
-            for p in session.players { latest[p.name.lowercased()] = p }
+            for p in session.players { var q = p; q.rated = p.rated.map { $0 + session.played(p.id) }; latest[p.name.lowercased()] = q }
         }
         return latest.filter { !here.contains($0.key) }.values
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -922,7 +1528,7 @@ struct SessionState: Codable, Equatable, Identifiable {
 
     /// Adds returning players to the back of the queue, in the order given, with fresh stats.
     mutating func addReturning(_ returning: [Player]) {
-        for p in returning { addPlayer(p.name, skill: p.skill) }
+        for p in returning { addPlayer(p.name, skill: p.skill, rated: p.rated) }
     }
 
     /// Adds someone who just arrived. They haven't played, so they go ahead of everyone waiting who has,
@@ -930,8 +1536,10 @@ struct SessionState: Codable, Equatable, Identifiable {
     /// A newcomer goes just ahead of everyone who has played, once. They're counted as having played as many games as the
     /// least-played player who has played, so after their first game they're in the normal order instead of catching up.
     /// Before the first game, everyone added starts as not here yet; they're marked present as they arrive.
-    mutating func addPlayer(_ name: String, skill: Double) {
-        let p = Player(name: name, skill: skill, away: true)
+    /// `rated`: rated games before this session (0 for a new player, nil for a regular from before this was counted).
+    mutating func addPlayer(_ name: String, skill: Double, rated: Int? = 0) {
+        let p = Player(name: name, skill: skill, away: true, rated: rated)
+        if players.isEmpty && results.isEmpty { date = Date() } // an empty session made at the end of last night is tonight's
         players.append(p)
         if !results.isEmpty || !onCourt.isEmpty { arrive(p.id) }
     }
@@ -942,7 +1550,11 @@ struct SessionState: Codable, Equatable, Identifiable {
         guard let p = player(id), p.away == true else { return }
         let n = gamesCounted
         let par = players.filter { !$0.paused && $0.away != true && played($0.id) > 0 }.compactMap { n[$0.id] }.min() ?? 0
-        let at = arrivalTime(), credit = max(p.credit ?? 0, par - played(id))
+        // Once 4 late arrivals are already waiting for their first game, later ones join at par in arrival order instead of going first.
+        let first = queue.filter(isNewcomer).count < Self.lateFirst
+        // In the first 30 minutes after the first game an arrival counts as on time: no credit, so they're up next like anyone yet to play.
+        let onTime = started.map { Self.now.timeIntervalSince($0) < Self.lateAfter } ?? true
+        let at = first ? arrivalTime() : Self.now, credit = onTime ? 0 : max(p.credit ?? 0, par - played(id))
         update(id) { $0.away = nil; $0.readyAt = at; $0.since = Self.now; $0.credit = credit > 0 ? credit : nil }
     }
 
@@ -958,19 +1570,124 @@ struct SessionState: Codable, Equatable, Identifiable {
 
     /// A fresh session with the same courts, optionally the same players (stats reset, everyone back to "any").
     func next(keepPlayers: Bool) -> SessionState {
-        let now = Date()
+        let now = Date(), ids = Dictionary(uniqueKeysWithValues: players.map { ($0.id, UUID()) })
         return SessionState(
+            // marked present as they arrive; locked teammates carry over
             players: keepPlayers ? players.enumerated().map { n, p in
-                Player(name: p.name, skill: p.skill, readyAt: now.addingTimeInterval(Double(n) * 0.001), away: true) // marked present as they arrive
+                Player(id: ids[p.id]!, name: p.name, skill: p.skill, readyAt: now.addingTimeInterval(Double(n) * 0.001),
+                       away: true, rated: p.rated.map { $0 + played(p.id) }, lock: p.lock.flatMap { ids[$0] })
             } : [],
-            courts: courts.map { Court(name: $0.name, format: $0.format) }
+            courts: courts.map { Court(name: $0.name, format: $0.format) },
+            queueMatching: queueMatching
         )
     }
 
     #if DEBUG
+    static func queueMatchingSelfCheck() {
+        func fixture(_ skills: [Double]) -> SessionState {
+            SessionState(players: skills.enumerated().map { Player(name: "M\($0.offset)", skill: $0.element, readyAt: now.addingTimeInterval(Double($0.offset))) }, courts: [Court(name: "C1", format: .doubles), Court(name: "C2", format: .doubles)])
+        }
+        var capped = fixture([5, 4, 4, 4]); capped.setQueueMatching(.equalSkill)
+        for _ in 0..<3 {
+            capped.results.append(GameResult(teamA: [capped.players[0].id], teamB: [UUID()], winner: 0, court: "C1", start: now.addingTimeInterval(-600), end: now.addingTimeInterval(-60)))
+        }
+        assert(capped.streakBoost(capped.players[0].id) == 0.5 && capped.matchSkill(capped.players[0].id) == 5, "winning streaks cannot push matching above 5.0")
+        assert(capped.skillRangeAllowed(capped.players.map(\.id)) && capped.pick(.doubles, from: capped.players) != nil, "a capped 5.0 player can match three 4.0 players")
+        assert(capped.players[0].skill == 5, "matching cap leaves saved ratings unchanged")
+        var cold = fixture([2.5, 3, 3, 3]); cold.setQueueMatching(.equalSkill)
+        for _ in 0..<4 {
+            cold.results.append(GameResult(teamA: [cold.players[0].id], teamB: [UUID()], winner: 1, court: "C1", start: now.addingTimeInterval(-600), end: now.addingTimeInterval(-60)))
+        }
+        let coldID = cold.players[0].id
+        assert(cold.streakBoost(coldID) == -1 && cold.matchSkill(coldID) == 2.5, "an isolated losing player uses their saved rating in strict mode")
+        assert(cold.pick(.doubles, from: cold.eligible(.doubles)) != nil && cold.skillRangeAllowed(cold.players.map(\.id)))
+        cold.setQueueMatching(.auto)
+        assert(cold.matchSkill(coldID) == 1.5, "Auto retains the losing-streak penalty")
+        cold.setQueueMatching(.balancedSkill)
+        assert(cold.matchSkill(coldID) == 1.5, "Balanced retains the losing-streak penalty")
+        cold.setQueueMatching(.equalSkill)
+        for (i, rating) in [1.8, 2.0, 2.2].enumerated() { cold.players[i+1].skill = rating }
+        assert(cold.matchSkill(coldID) == 1.5, "keep a penalty that still permits a strict group")
+        cold.players = Array(cold.players.prefix(2)); cold.players[1].skill = 3
+        assert(cold.matchSkill(coldID, format: .singles) == 2.5 && cold.pick(.singles, from: cold.eligible(.singles)) != nil, "singles uses the same fallback")
+        assert(cold.players[0].skill == 2.5 && cold.streakBoost(coldID) == -1, "fallback changes neither saved rating nor streak history")
+        var s = fixture([2, 2, 3, 3])
+        assert(s.matchingMode == .auto)
+        let old = s.pick(.doubles, from: s.players)!
+        s.queueMatching = .auto
+        assert(s.pick(.doubles, from: s.players)!.a.map(\.id) == old.a.map(\.id))
+        s.setQueueMatching(.equalSkill)
+        assert(s.pick(.doubles, from: s.players) != nil, "strict boundary includes 1.0")
+        s.players[3].skill = 3.01
+        assert(s.pick(.doubles, from: s.players) == nil, "no fallback widens strict range")
+        s.setQueueMatching(.balancedSkill)
+        assert(s.pick(.doubles, from: s.players) != nil)
+        s = fixture([1, 3, 3, 3, 3]); s.setQueueMatching(.equalSkill)
+        let p = s.pick(.doubles, from: s.players)!
+        assert(!(p.a+p.b).contains { $0.id == s.players[0].id }, "try later heads")
+        assert(s.pick(.singles, from: Array(s.players.prefix(2))) == nil)
+        for k in 0..<8 {
+            let g = s.pick(.doubles, from: s.players, choice: k)!
+            assert(s.skillRangeAllowed((g.a+g.b).map(\.id)))
+        }
+        s = fixture(Array(repeating: 3, count: 8)); s.setQueueMatching(.equalSkill)
+        let up = s.queueUpNext
+        assert(up.count == 2 && Set(up.flatMap { ($0.a+$0.b).map(\.id) }).count == 8)
+        let c = s.courts[0].id, shown = s.nextPairing(for: s.courts[0])!
+        s.fill(c, shown: shown)
+        assert(s.courts[0].match?.teamA == shown.a.map(\.id))
+        let playing = s.courts[0].match
+        s.courts[1].plan = Match(teamA: [s.players[4].id,s.players[5].id], teamB: [s.players[6].id,s.players[7].id])
+        s.courts[1].locked = 0; s.courts[1].shuffles = 4
+        s.setQueueMatching(.balancedSkill)
+        assert(s.courts[0].match == playing && s.courts[1].plan == nil && s.courts[1].locked == nil && s.courts[1].shuffles == nil)
+        s.courts[1].plan = Match(teamA: [s.players[4].id,s.players[5].id], teamB: [s.players[6].id,s.players[7].id], queueOverride: true)
+        s.setQueueMatching(.equalSkill)
+        assert(s.courts[1].plan != nil)
+        assert(s.next(keepPlayers: true).matchingMode == .equalSkill)
+        let encoded = try! JSONEncoder().encode(s)
+        assert(try! JSONDecoder().decode(SessionState.self, from: encoded).matchingMode == .equalSkill)
+        var json = try! JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        json.removeValue(forKey: "queueMatching")
+        let legacy = try! JSONSerialization.data(withJSONObject: json)
+        assert(try! JSONDecoder().decode(SessionState.self, from: legacy).matchingMode == .auto)
+        s = fixture([3, 1, 5, 3, 3, 3])
+        let narrow = s.pick(.doubles, from: s.players)!
+        assert(Set((narrow.a+narrow.b).map(\.id)) == Set([0,3,4,5].map { s.players[$0].id }))
+        s.setQueueMatching(.balancedSkill)
+        let mixed = s.pick(.doubles, from: s.players)!
+        assert(Set((mixed.a+mixed.b).map(\.id)) == Set(s.players.prefix(4).map(\.id)), "Balanced prefers queue turns over narrow range")
+        s = fixture(Array(repeating: 3, count: 8)); s.setQueueMatching(.equalSkill)
+        s.courts[1].plan = Match(teamA: [s.players[4].id,s.players[5].id], teamB: [s.players[6].id,s.players[7].id], queueOverride: true)
+        s.shuffle(s.courts[0].id)
+        s.setQueueMatching(.balancedSkill)
+        assert(s.courts[1].plan?.queueOverride == true, "shuffling another court keeps explicit replacement provenance")
+        s = fixture([1, 3, 3, 3]); s.setQueueMatching(.balancedSkill)
+        let stale = s.pick(.doubles, from: s.players)!
+        s.setQueueMatching(.equalSkill); s.fill(s.courts[0].id, shown: stale)
+        assert(s.courts[0].match == nil, "Start rejects an outdated wide preview")
+        s = fixture([2, 2, 3, 3]); s.setQueueMatching(.equalSkill)
+        for _ in 0..<3 {
+            s.results.append(GameResult(teamA: [s.players[2].id,s.players[3].id], teamB: [s.players[0].id,s.players[1].id], winner: 0, court: "C1", start: now.addingTimeInterval(-600), end: now.addingTimeInterval(-60)))
+        }
+        assert(!s.skillRangeAllowed(s.players.map(\.id)) && s.pick(.doubles, from: s.players) == nil, "streak boosts count toward strict spread")
+        s = fixture([1, 1, 3, 3]); s.setQueueMatching(.equalSkill)
+        s.players[0].lock = s.players[1].id; s.players[1].lock = s.players[0].id
+        assert(s.pick(.doubles, from: s.players) == nil, "locked-team search cannot bypass strict spread")
+    }
+
     static func selfCheck() {
+        Store.webExportSelfCheck()
         Tournament.selfCheck()
-        // Standings: 5 of 5 beats 6 of 7 at the same pace; a quick game counts as one-sided.
+        queueMatchingSelfCheck()
+        queueSimplifiedSelfCheck()
+        scheduledSelfCheck()
+        let rally = RallyMotion("court-a")
+        assert(rally.unit(5, 1) == RallyMotion("court-a").unit(5, 1), "rallies remain stable across redraws")
+        assert(rally.unit(5, 1) != RallyMotion("court-b").unit(5, 1), "courts have independent rallies")
+        assert(Set((0..<40).map { rally.unit($0, 1) }).count == 40, "rally targets vary by shot")
+        assert((0..<100).allSatisfy { (0...1).contains(rally.unit($0, 0)) }, "rally targets stay in bounds")
+        // Standings: 5 of 5 beats 6 of 7; game length doesn't count, so equal records draw.
         var table = SessionState(players: [Player(name: "A"), Player(name: "B"), Player(name: "X")])
         let (pa, pb, px) = (table.players[0].id, table.players[1].id, table.players[2].id)
         func game(_ w: UUID, _ l: UUID, won: Bool = true, minutes: Double = 10) -> GameResult {
@@ -978,20 +1695,24 @@ struct SessionState: Codable, Equatable, Identifiable {
         }
         table.results = Array(repeating: game(pa, px), count: 6) + [game(pa, px, won: false)] + Array(repeating: game(pb, px), count: 5)
         assert(table.score(pb) > table.score(pa), "5 of 5 should rank above 6 of 7")
-        table.results.append(game(pa, px, minutes: 4))
-        assert(table.speed(of: table.results.last!) == 1 && table.speed(of: table.results[0]) == 0, "quick game is one-sided, usual game is neutral")
-        let fastWin = table.score(pa)
-        table.results[table.results.count - 1] = game(pa, px, minutes: 20)
-        assert(table.score(pa) < fastWin, "a quick win should count more than a close one")
-        table.results = Array(repeating: game(pb, px, minutes: 18), count: 5) + [game(pa, px)] + (0..<5).map { _ in game(UUID(), UUID()) }
-        assert(table.score(pb) > table.score(pa), "5 close wins should still beat 1 win")
-        table.results = Array(repeating: game(pa, px, minutes: 18), count: 4) + Array(repeating: game(pb, px, minutes: 4), count: 3)
-            + [game(pb, px, won: false, minutes: 4)] + (0..<5).map { _ in game(UUID(), UUID()) }
-        assert(table.score(pa) > table.score(pb), "an extra win outweighs any game length")
+        table.results = Array(repeating: game(pa, px, minutes: 4), count: 7) + [game(pa, px, won: false)]
+            + Array(repeating: game(pb, px, minutes: 20), count: 7) + [game(pb, px, won: false, minutes: 20)]
+        assert(table.score(pa) == table.score(pb), "game length doesn't count: equal records draw")
+        assert(StandingsSheet.places([70, 70, 70, 64, 61, 61, 50]) == [1, 1, 1, 2, 3, 3, 4], "draws share a place; the next score takes the next place")
+        // Sessions saved with the removed partner-request field still decode without losing their other data.
+        let saved = Store(sessions: [table])
+        var legacy = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(saved)) as! [String: Any]
+        var legacySessions = legacy["sessions"] as! [[String: Any]]
+        var legacyPlayers = legacySessions[0]["players"] as! [[String: Any]]
+        legacyPlayers[0]["partner"] = table.players[1].id.uuidString
+        legacyPlayers[1]["partner"] = table.players[0].id.uuidString
+        legacySessions[0]["players"] = legacyPlayers; legacy["sessions"] = legacySessions
+        let decoded = try! JSONDecoder().decode(Store.self, from: JSONSerialization.data(withJSONObject: legacy))
+        assert(decoded == saved, "legacy pair requests are ignored; players, ratings and results survive")
         // Fewer games goes first; moving to front beats that.
         var order = SessionState()
         order.players = [Player(name: "1", readyAt: .distantPast), Player(name: "2")]
-        order.results = [GameResult(teamA: [order.players[0].id], teamB: [UUID()], winner: nil, court: "", start: Date())]
+        order.results = [GameResult(teamA: [order.players[0].id], teamB: [UUID()], winner: 0, court: "", start: Date())]
         assert(order.queue[0].name == "2", "fewer games goes first")
         order.moveToFront(order.players[0].id)
         assert(order.queue[0].name == "1", "moved to front beats fewer games")
@@ -1028,7 +1749,7 @@ struct SessionState: Codable, Equatable, Identifiable {
         // Newcomers go ahead of players who've already played, behind others still waiting for a first game,
         // and several newcomers keep the order they arrived in.
         var late = SessionState(players: ["A", "B", "C"].enumerated().map { Player(name: $0.element, readyAt: Date(timeIntervalSince1970: Double($0.offset))) })
-        late.results.append(GameResult(teamA: [late.players[2].id], teamB: [late.players[1].id], winner: 0, court: "C", start: Date()))
+        late.results.append(GameResult(teamA: [late.players[2].id], teamB: [late.players[1].id], winner: 0, court: "C", start: Date(timeIntervalSinceNow: -3600)))
         late.update(late.players[1].id) { $0.readyAt = Date(timeIntervalSince1970: 100) }
         late.update(late.players[2].id) { $0.readyAt = Date(timeIntervalSince1970: 101) }
         late.addPlayer("New1", skill: 3)
@@ -1036,7 +1757,7 @@ struct SessionState: Codable, Equatable, Identifiable {
         assert(late.queue.map(\.name) == ["A", "New1", "New2", "B", "C"], "newcomers should queue ahead of players who've played")
         // A late arrival goes first once, then joins the normal order instead of catching up on games.
         var par = SessionState(players: ["X", "Y"].enumerated().map { Player(name: $0.element, readyAt: Date(timeIntervalSince1970: Double($0.offset))) })
-        for _ in 0..<3 { par.results.append(GameResult(teamA: [par.players[0].id], teamB: [par.players[1].id], winner: 0, court: "C", start: Date())) }
+        for _ in 0..<3 { par.results.append(GameResult(teamA: [par.players[0].id], teamB: [par.players[1].id], winner: 0, court: "C", start: Date(timeIntervalSinceNow: -3600))) }
         par.addPlayer("Late", skill: 3)
         assert(par.queue.first?.name == "Late", "a late arrival goes to the front on arrival")
         let lateID = par.players[2].id
@@ -1053,7 +1774,7 @@ struct SessionState: Codable, Equatable, Identifiable {
         // Marked present later, they come in like a late arrival: after 0-game players, at par.
         var mark = SessionState(players: ["X", "Y", "Z", "W"].enumerated().map { Player(name: $0.element, readyAt: Date(timeIntervalSince1970: Double($0.offset))) })
         mark.players[3].away = true
-        for _ in 0..<3 { mark.results.append(GameResult(teamA: [mark.players[0].id], teamB: [mark.players[1].id], winner: 0, court: "C", start: Date())) }
+        for _ in 0..<3 { mark.results.append(GameResult(teamA: [mark.players[0].id], teamB: [mark.players[1].id], winner: 0, court: "C", start: Date(timeIntervalSinceNow: -3600))) }
         mark.update(mark.players[2].id) { $0.readyAt = Date(timeIntervalSince1970: 50) }
         assert(!mark.queue.contains { $0.name == "W" }, "not here: out of the line")
         mark.arrive(mark.players[3].id)
@@ -1072,49 +1793,121 @@ struct SessionState: Codable, Equatable, Identifiable {
             assert(InstallExpiry.label(expiry, now: expiry.addingTimeInterval(-60)).hasPrefix("Renew today"), "last day says today")
             assert(InstallExpiry.label(expiry, now: expiry.addingTimeInterval(60)).hasPrefix("Expired"), "past the date says expired")
         }
-        // Partner requests: one even game together per session, never in the first game, then like anyone else.
-        var duo = SessionState(players: [3.5, 3, 3, 3, 3, 3, 3, 2.5].enumerated().map { Player(name: "\($0.offset)", skill: $0.element, readyAt: Date(timeIntervalSinceNow: Double($0.offset) - 60)) })
-        duo.courts = [Court(name: "C", format: .doubles)] // 8 players clear the minimum of 6 for one court
-        let (dx, dy) = (duo.players[0].id, duo.players[7].id)
-        duo.setPartner(dx, dy)
-        assert(!duo.pairWaiting(dx, dy) && duo.pairsKeptApart() == [[dx, dy]], "start of the night: kept apart until each has played")
-        for id in [dx, dy] { duo.results.append(GameResult(teamA: [id, duo.players[3].id], teamB: [duo.players[4].id, duo.players[5].id], winner: 0, court: "C", start: Date())) }
-        duo.results.append(GameResult(teamA: [duo.players[1].id, duo.players[2].id], teamB: [duo.players[6].id, duo.players[4].id], winner: 0, court: "C", start: Date()))
-        let duoGame = duo.pick(.doubles, from: duo.eligible(.doubles))!
-        let duoGap = abs(duoGame.a.map(\.skill).reduce(0, +) - duoGame.b.map(\.skill).reduce(0, +)) / 2
-        assert([duoGame.a, duoGame.b].contains { Set($0.map(\.id)) == [dx, dy] } && duoGap <= pairSlack + 1e-9, "a waiting pair gets an even game")
-        assert(duoGame.options >= 2, "shuffle stays available on a pair's game")
-        var hold = SessionState(players: duo.players, results: duo.results) // before their game, for the on-hold check below
-        duo.results.append(GameResult(teamA: [dx, dy], teamB: [duo.players[1].id, duo.players[2].id], winner: 0, court: "C", start: Date()))
-        assert(!duo.pairWaiting(dx, dy) && duo.pairsKeptApart().isEmpty
-               && duo.partnerGames(duo.queue, picked: duo.queue, overdue: [], justOff: []).isEmpty, "after their game the pair is like anyone else")
-        // A far-apart pair (4.9 & 3.0) still gets an even game; the range may be wider than usual.
-        var wide = SessionState(players: [4.9, 4.0, 3.9, 3.5, 3.2, 3.1, 3.0, 2.8].enumerated().map { Player(name: "\($0.offset)", skill: $0.element, readyAt: Date(timeIntervalSinceNow: Double($0.offset) - 60)) })
-        wide.courts = [Court(name: "C", format: .doubles)]
-        let (wx, wy) = (wide.players[0].id, wide.players[6].id), w = wide.players.map(\.id)
-        wide.setPartner(wx, wy)
-        wide.results += [GameResult(teamA: [wx, w[7]], teamB: [w[5], w[4]], winner: 0, court: "C", start: Date()),
-                         GameResult(teamA: [wy, w[7]], teamB: [w[5], w[4]], winner: 0, court: "C", start: Date())]
-        let wideGames = wide.partnerGames(wide.queue, picked: wide.queue, overdue: [], justOff: [])
-        assert(!wideGames.isEmpty && wideGames.allSatisfy { abs($0.a.map(\.skill).reduce(0, +) - $0.b.map(\.skill).reduce(0, +)) / 2 <= pairSlack + 1e-9 },
-               "a far-apart pair still gets an even game")
-        let rested = wide.partnerGames(wide.queue, picked: wide.queue, overdue: [], justOff: [wide.players[2].id])
-        assert(!rested.isEmpty && !rested.contains { ($0.a + $0.b).contains { $0.id == wide.players[2].id } }, "a pair game calls nobody straight back")
-        // One pair game at a time, and never two pairs in one game.
-        var two = SessionState(players: (0..<16).map { Player(name: "\($0)", skill: 3, readyAt: Date(timeIntervalSinceNow: Double($0) - 60)) })
-        two.courts = (1...2).map { Court(name: "C\($0)", format: .doubles) }
-        let t = two.players.map(\.id)
-        two.setPartner(t[0], t[1]); two.setPartner(t[2], t[3])
-        two.results += [([t[0], t[4]], [t[5], t[6]]), ([t[1], t[7]], [t[8], t[9]]), ([t[2], t[10]], [t[11], t[12]]),
-                        ([t[3], t[13]], [t[14], t[15]]), ([t[4], t[5]], [t[6], t[7]])].map { GameResult(teamA: $0.0, teamB: $0.1, winner: 0, court: "C", start: Date()) }
-        assert(two.queueUpNext.filter { two.isPairGame($0.a.map(\.id), $0.b.map(\.id)) }.count == 1, "exactly one pair game lined up at a time")
-        assert(!two.queueUpNext.contains { g in [g.a, g.b].allSatisfy { team in two.pairsKeptApart().contains(Set(team.map(\.id))) } }, "never two pairs in one game")
-        two.fill(two.courts.first { two.nextPairing(for: $0).map { two.isPairGame($0.a.map(\.id), $0.b.map(\.id)) } ?? false }!.id)
-        assert(two.pairGameOnCourt && !two.queueUpNext.contains { two.isPairGame($0.a.map(\.id), $0.b.map(\.id)) }, "no second pair game while one is playing")
-        // Too few players for the courts: requests are kept but on hold.
-        hold.courts = (1...2).map { Court(name: "C\($0)", format: .doubles) }
-        assert(hold.pairingMinimum == 14 && !hold.pairingActive && hold.partnerGames(hold.queue, picked: hold.queue, overdue: [], justOff: []).isEmpty
-               && hold.pairsKeptApart().isEmpty, "pair requests wait for 14 players on 2 courts")
+        // Arrivals in the first 30 minutes after the first game count as on time (no credit); later ones join at par.
+        var lateS = SessionState(players: (0..<6).map { Player(name: "L\($0)", readyAt: Date(timeIntervalSinceNow: Double($0) - 60)) }
+                                 + [Player(name: "Early", away: true), Player(name: "Late", away: true)])
+        lateS.courts = [Court(name: "C1", format: .doubles)]
+        let lx = UUID()
+        for p in lateS.players.prefix(4) { lateS.results.append(GameResult(teamA: [p.id], teamB: [lx], winner: 0, court: "", start: Date(timeIntervalSinceNow: -20 * 60))) }
+        lateS.arrive(lateS.players[6].id)
+        SessionState.simulatedNow = Date(timeIntervalSinceNow: 20 * 60)
+        lateS.arrive(lateS.players[7].id)
+        SessionState.simulatedNow = nil
+        assert(lateS.players[6].credit == nil && lateS.players[7].credit == 1, "late-arrival credit only from 30 minutes after the first game")
+        // Manual mode: the chosen four are the court's game (none until every slot is filled), kept out of other courts' picks,
+        // never shuffled; a finished game ends it.
+        var man = SessionState(players: (0..<10).map { Player(name: "M\($0)", readyAt: Date(timeIntervalSinceNow: Double($0) - 60)) })
+        man.courts = [Court(name: "C1", format: .doubles), Court(name: "C2", format: .doubles)]
+        let mc = man.courts[0].id, mine = man.players.suffix(4).map(\.id) // the back of the line
+        man.setManual(true, on: mc)
+        for (k, id) in mine.prefix(3).enumerated() { man.setSlot(k, to: id, on: mc) }
+        let manPartial = man.nextPairing(for: man.courts[0]) == nil
+        man.setSlot(3, to: mine[3], on: mc)
+        let manGame = man.nextPairing(for: man.courts[0])!, manOther = man.nextPairing(for: man.courts[1])!
+        man.shuffle(mc)
+        let manSame = man.nextPairing(for: man.courts[0]).map { ($0.a + $0.b).map(\.id) } == mine
+        man.fill(mc); man.finish(mc, winner: 0)
+        assert(manPartial && (manGame.a + manGame.b).map(\.id) == mine && manGame.options == 1 && !(manOther.a + manOther.b).contains { mine.contains($0.id) }
+               && manSame && man.courts[0].manual == nil, "manual mode: chosen lineup, not shuffled, back to automatic after the game")
+        // Locked teammates: if no equal-or-stronger opponents are available, they wait while others play.
+        var lockS = SessionState(players: [3.0, 3.0, 3.2, 3.4, 2.6, 2.8, 3.1, 3.3, 2.9, 3.0, 3.5, 2.7].enumerated().map {
+            Player(name: "K\($0.offset)", skill: $0.element, readyAt: Date(timeIntervalSinceNow: Double($0.offset) - 60)) })
+        lockS.courts = [Court(name: "C1", format: .doubles)]
+        let kid = lockS.players.map(\.id)
+        lockS.setLock(kid[0], kid[1])
+        let lg = lockS.pick(.doubles, from: lockS.queue)!
+        let lgA = lg.a.contains { $0.id == kid[0] }, lt = lgA ? lg.a : lg.b, lo = lgA ? lg.b : lg.a
+        assert(lt.contains { $0.id == kid[1] } && lockS.averageSkill(lo.map(\.id)) >= 3 - lockEqual, "locked teammates play together against an equal or stronger team")
+        var lockRating = SessionState(players: ([4.0, 4.0] + Array(repeating: 2.0, count: 12) + [4.1, 4.1]).enumerated().map { Player(name: "R\($0.offset)", skill: $0.element) })
+        let rid = lockRating.players.map(\.id), rule = LockRule(x: rid[0], y: rid[1], apart: false)
+        lockRating.setLock(rid[0], rid[1])
+        let fallback = lockRating.lockedGame(lockRating.players, rule, locks: [rule])!
+        assert(fallback.b.map(\.id).contains(rid[14]) && fallback.b.map(\.id).contains(rid[15]), "locked fallback searches beyond the front of the line for equal-or-stronger opponents before rested weaker opponents")
+        lockRating.results.append(GameResult(teamA: [rid[14]], teamB: [rid[15]], winner: 0, court: "", start: Date()))
+        assert(lockRating.lockedGame(lockRating.players, rule, locks: [rule]) == nil, "locked games cannot recall opponents one counted game ahead")
+        lockRating.results = []
+        lockRating.update(rid[14]) { $0.credit = 3 }; lockRating.update(rid[15]) { $0.credit = 3 }
+        assert(lockRating.lockedGame(lockRating.players, rule, locks: [rule]) == nil, "a lock cannot pull opponents more than one game ahead of the waiting line")
+        var lockLastResort = SessionState(players: [4.0, 4.0, 2.0, 2.0].enumerated().map { Player(name: "L\($0.offset)", skill: $0.element) })
+        let lid = lockLastResort.players.map(\.id)
+        lockLastResort.setLock(lid[0], lid[1])
+        assert(lockLastResort.pick(.doubles, from: lockLastResort.queue) == nil, "a locked pair waits when only weaker opponents are available")
+        let idleGame = lockLastResort.pick(.doubles, from: lockLastResort.queue, allowIdleRelease: true)
+        assert(idleGame == nil, "idle courts do not split locked pairs early")
+        let fallbackPlayers = [5.0, 1.0, 4.0, 2.0].enumerated().map { Player(name: "F\($0.offset)", skill: $0.element) }
+        let fallbackIDs = fallbackPlayers.map(\.id)
+        lockCtx = LockCtx(locks: [LockRule(x: fallbackIDs[0], y: fallbackIDs[1], apart: true)], strict: true, real: Dictionary(uniqueKeysWithValues: fallbackPlayers.map { ($0.id, $0.skill) }), opponents: Set(fallbackIDs), rested: nil)
+        let legalFallback = lastResortSplits(fallbackPlayers).first
+        lockCtx = nil
+        assert(legalFallback != nil && legalFallback!.a.contains { $0.id == fallbackIDs[0] } != legalFallback!.a.contains { $0.id == fallbackIDs[1] }, "fallback finds a legal split when the fairest raw split reunites released partners")
+        var catchup = lockLastResort
+        catchup.update(lid[2]) { $0.credit = 2 }; catchup.update(lid[3]) { $0.credit = 2 }
+        let catchupGame = catchup.pick(.doubles, from: catchup.queue)
+        assert(catchupGame == nil, "game-count deficit does not split locked pairs")
+        for i in lockLastResort.players.indices { lockLastResort.players[i].readyAt = Date(timeIntervalSinceNow: -21 * 60) }
+        lockLastResort.results.append(GameResult(teamA: [lid[2]], teamB: [lid[3]], winner: 0, court: "", start: Date(timeIntervalSinceNow: -21 * 60)))
+        let splitAfterWait = lockLastResort.pick(.doubles, from: lockLastResort.queue)
+        assert(splitAfterWait == nil, "21 minutes is too early to split an unmatchable pair")
+        var lockWait = SessionState(players: [4.0, 4.0, 3.0, 3.0, 3.0, 3.0].enumerated().map { Player(name: "W\($0.offset)", skill: $0.element) })
+        let wid = lockWait.players.map(\.id)
+        lockWait.setLock(wid[0], wid[1])
+        let otherGame = lockWait.pick(.doubles, from: lockWait.queue)
+        assert(otherGame != nil && !(otherGame!.a + otherGame!.b).contains { [wid[0], wid[1]].contains($0.id) }, "unlocked players can fill the court while a locked pair waits")
+        for k in 0..<3 { lockS.results.append(GameResult(teamA: [kid[0], kid[1]], teamB: [kid[2 + k], kid[5 + k]], winner: 0, court: "", start: Date(timeIntervalSinceNow: -600))) }
+        lockS.results.append(GameResult(teamA: [kid[8], kid[9]], teamB: [kid[10], kid[11]], winner: 0, court: "", start: Date(timeIntervalSinceNow: -600)))
+        lockS.update(kid[0]) { $0.first = true }; lockS.update(kid[1]) { $0.first = true }
+        let sg = lockS.pick(.doubles, from: lockS.queue)!
+        let cooldown = lockS.lockContext(lockS.queue), sgA = sg.a.map(\.id), sgB = sg.b.map(\.id)
+        assert(lockS.splitDue(kid[0], kid[1]) && !(sgA.contains(kid[0]) && sgA.contains(kid[1])) && !(sgB.contains(kid[0]) && sgB.contains(kid[1]))
+               && SessionState.lockMembers([kid[0], kid[2], kid[3], kid[4]], cooldown)
+               && SessionState.keepsLocks([kid[0], kid[2]], [kid[3], kid[4]], cooldown, strict: true, real: Dictionary(uniqueKeysWithValues: lockS.players.map { ($0.id, $0.skill) }))
+               && SessionState.keepsLocks([kid[0], kid[2]], [kid[1], kid[3]], cooldown, strict: true, real: Dictionary(uniqueKeysWithValues: lockS.players.map { ($0.id, $0.skill) })),
+               "cooldown players can play independently or naturally meet as opponents, but cannot team")
+        var busyCooldown = lockS
+        busyCooldown.courts[0].match = Match(teamA: [kid[0], kid[2]], teamB: [kid[3], kid[4]])
+        busyCooldown.update(kid[1]) { $0.first = true; $0.since = Date() }
+        assert(busyCooldown.eligible(.doubles).contains { $0.id == kid[1] }, "cooldown players remain independently eligible while their mate plays")
+        var fourCooldown = SessionState(players: (0..<4).map { Player(name: "C\($0)", skill: 3) })
+        let fid = fourCooldown.players.map(\.id)
+        fourCooldown.setLock(fid[0], fid[1])
+        for _ in 0..<3 { fourCooldown.results.append(GameResult(teamA: [fid[0], fid[1]], teamB: [fid[2], fid[3]], winner: 0, court: "", start: Date())) }
+        for first in [0, 2] {
+            for i in fourCooldown.players.indices { fourCooldown.players[i].first = i == first }
+            let game = fourCooldown.pick(.doubles, from: fourCooldown.queue)!
+            assert(game.a.contains { $0.id == fid[0] } != game.a.contains { $0.id == fid[1] }, "four available players can play during cooldown regardless of queue order")
+        }
+        lockS.update(kid[0]) { $0.since = Date(timeIntervalSinceNow: -30 * 60) }; lockS.update(kid[1]) { $0.since = Date(timeIntervalSinceNow: -30 * 60) }
+        let overdueSplit = lockS.pick(.doubles, from: lockS.queue)!
+        assert(![overdueSplit.a, overdueSplit.b].contains { Set([kid[0], kid[1]]).isSubset(of: $0.map(\.id)) }, "overdue cooldown players do not become teammates")
+        lockS.results.append(GameResult(teamA: [kid[0], kid[2]], teamB: [kid[3], kid[4]], winner: 0, court: "", start: Date(timeIntervalSinceNow: -600)))
+        assert(lockS.splitDue(kid[0], kid[1]), "one player's separate game does not end the other's cooldown")
+        lockS.results.append(GameResult(teamA: [kid[1], kid[2]], teamB: [kid[3], kid[4]], winner: 0, court: "", start: Date(timeIntervalSinceNow: -600)))
+        assert(!lockS.splitDue(kid[0], kid[1]), "after both play a separate game, the lock resumes")
+        lockS.courts[0].match = Match(teamA: [kid[1], kid[5]], teamB: [kid[6], kid[7]])
+        let busyPick = lockS.pick(.doubles, from: lockS.eligible(.doubles))!
+        assert(!(busyPick.a + busyPick.b).contains { $0.id == kid[0] }, "a locked player waits while their teammate is on court")
+        // Two far-apart locked pairs both overdue: one of them plays (with two others), not the two pairs against each other.
+        var lock2 = SessionState(players: [4.2, 2.1, 4.5, 4.3, 1.6, 1.4, 3.7, 3.3, 2.2, 1.1, 2.3, 1.7].enumerated().map {
+            Player(name: "O\($0.offset)", skill: $0.element, readyAt: Date(timeIntervalSinceNow: Double($0.offset) - 60)) })
+        lock2.courts = [Court(name: "C1", format: .doubles)]
+        let oid = lock2.players.map(\.id)
+        lock2.setLock(oid[0], oid[1]); lock2.setLock(oid[2], oid[3])
+        for i in 0..<4 { lock2.update(oid[i]) { $0.since = Date(timeIntervalSinceNow: -30 * 60) } }
+        lock2.results.append(GameResult(teamA: [oid[8], oid[9]], teamB: [oid[10], oid[11]], winner: 0, court: "", start: Date(timeIntervalSinceNow: -3600)))
+        let od2 = lock2.pick(.doubles, from: lock2.queue)!, od2ids = (od2.a + od2.b).map(\.id)
+        assert(od2ids.filter { oid.prefix(4).contains($0) }.count == 2
+               && keepsLocks(od2.a.map(\.id), od2.b.map(\.id), lock2.lockContext(lock2.queue), strict: false, real: Dictionary(uniqueKeysWithValues: lock2.players.map { ($0.id, $0.skill) })),
+               "two overdue locked pairs: one plays, still together")
         // Locking a side: shuffle keeps those players and changes only the other side, nobody on both.
         var lk = SessionState(players: [3.0, 3, 3, 3, 3, 3, 3, 3, 3, 3].enumerated().map { Player(name: "\($0.offset)", skill: $0.element, readyAt: Date(timeIntervalSinceNow: Double($0.offset) - 60)) })
         lk.courts = [Court(name: "C", format: .doubles)]
@@ -1130,7 +1923,7 @@ struct SessionState: Codable, Equatable, Identifiable {
         assert(seenB.count == 4, "shuffle with a lock should keep changing the other side")
         // Someone still on 0 games stays ahead of a late arrival, and doesn't cost the arrival their credit.
         var zero = SessionState(players: ["X", "Y", "Z"].enumerated().map { Player(name: $0.element, readyAt: Date(timeIntervalSince1970: Double($0.offset))) })
-        for _ in 0..<3 { zero.results.append(GameResult(teamA: [zero.players[0].id], teamB: [zero.players[1].id], winner: 0, court: "C", start: Date())) }
+        for _ in 0..<3 { zero.results.append(GameResult(teamA: [zero.players[0].id], teamB: [zero.players[1].id], winner: 0, court: "C", start: Date(timeIntervalSinceNow: -3600))) }
         zero.update(zero.players[2].id) { $0.readyAt = Date(timeIntervalSince1970: 50) }
         zero.addPlayer("Late", skill: 3)
         assert(zero.queue.map(\.name) == ["Z", "Late", "X", "Y"] && zero.players[3].credit == 3, "a late arrival goes after 0-game players, at par")
@@ -1166,26 +1959,28 @@ struct SessionState: Codable, Equatable, Identifiable {
         var waitCheck = SessionState(players: (0..<8).map { Player(name: "\($0)", skill: 3, readyAt: Date(timeIntervalSinceNow: Double($0))) })
         for i in [6, 7] {
             waitCheck.players[i].since = Date(timeIntervalSinceNow: -50 * 60)
-            waitCheck.results.append(GameResult(teamA: [waitCheck.players[i].id], teamB: [UUID()], winner: 0, court: "", start: Date()))
+            waitCheck.results.append(GameResult(teamA: [waitCheck.players[i].id], teamB: [UUID()], winner: 0, court: "", start: Date(timeIntervalSinceNow: -3600)))
         }
         let overdueGame = waitCheck.pick(.doubles, from: waitCheck.queue)!
-        assert(Set([waitCheck.players[6].id, waitCheck.players[7].id]).isSubset(of: (overdueGame.a + overdueGame.b).map(\.id))
-               && overdueGame.note?.contains("waited") == true, "everyone overdue plays next")
+        assert(overdueGame.note?.contains("waited") != true, "overdue inclusion and notes are paused")
         // More overdue than a court takes: fewest games first, and a late arrival counts at par (not ahead for the games they missed).
         var fewer = SessionState(players: ["C", "D", "E", "F", "A", "Late", "G", "H"].enumerated().map { Player(name: $0.element, skill: 3, readyAt: Date(timeIntervalSinceNow: Double($0.offset))) })
-        for (i, games, mins) in [(0, 2, 25), (1, 2, 25), (2, 2, 25), (3, 2, 25), (5, 0, 40), (4, 3, 50)] {
+        for (i, games, mins) in [(0, 2, 25), (1, 2, 25), (2, 2, 25), (3, 2, 25), (5, 0, 27), (4, 3, 28)] {
             fewer.players[i].since = Date(timeIntervalSinceNow: Double(-mins * 60))
-            for _ in 0..<games { fewer.results.append(GameResult(teamA: [fewer.players[i].id], teamB: [UUID()], winner: 0, court: "", start: Date())) }
+            for _ in 0..<games { fewer.results.append(GameResult(teamA: [fewer.players[i].id], teamB: [UUID()], winner: 0, court: "", start: Date(timeIntervalSinceNow: -3600))) }
         }
         fewer.players[5].credit = 3
         let fewerGame = fewer.pick(.doubles, from: fewer.queue)!
-        assert(Set((fewerGame.a + fewerGame.b).map(\.name)) == ["C", "D", "E", "F"], "overdue: fewest games first, a late arrival at par")
+        assert(!(fewerGame.a+fewerGame.b).contains { ["A","Late"].contains($0.name) }, "counted-game fairness retains arrival credit")
+        fewer.players[4].since = Date(timeIntervalSinceNow: -50 * 60); fewer.players[5].since = Date(timeIntervalSinceNow: -40 * 60)
+        let hardWait = fewer.pick(.doubles, from: fewer.queue)!
+        assert(!(hardWait.a+hardWait.b).contains { ["A","Late"].contains($0.name) }, "30-minute waits do not override counted games")
         // An overdue strong player gets a balanced game within 2 levels rather than a lopsided one.
         var stretch = SessionState(players: [5.0, 4.5, 3.5, 3, 3, 3, 2, 1].enumerated().map { Player(name: "\($0.offset)", skill: $0.element, readyAt: Date(timeIntervalSinceNow: Double($0.offset))) })
         stretch.players[0].since = Date(timeIntervalSinceNow: -35 * 60)
-        stretch.results.append(GameResult(teamA: [stretch.players[0].id], teamB: [UUID()], winner: 0, court: "", start: Date()))
+        stretch.results.append(GameResult(teamA: [stretch.players[0].id], teamB: [UUID()], winner: 0, court: "", start: Date(timeIntervalSinceNow: -3600)))
         let stretchGame = stretch.pick(.doubles, from: stretch.queue)!, stretchSkills = (stretchGame.a + stretchGame.b).map(\.skill)
-        assert(stretchSkills.contains(5) && stretchSkills.max()! - stretchSkills.min()! <= overdueSpread + 1e-9, "an overdue game stays within 2 levels")
+        assert(!stretchSkills.contains(5), "overdue players no longer force a wider game")
         // Rest first: rather than call three players straight back for a similar game, balanced teams from rested players.
         let resting = [5, 4.2, 3.8, 3.0, 5, 5, 4.8].enumerated().map { Player(name: "\($0.offset)", skill: $0.element) }
         let restGame = pickDoubles(resting, justOff: Set(resting[4...].map(\.id)))!
@@ -1202,8 +1997,8 @@ struct SessionState: Codable, Equatable, Identifiable {
         }
         let again = pickDoubles(eight, recent: lastGame([0, 3], [1, 2]))!
         let firstTry = pickDoubles(eight)!
-        assert(repeats(again.a, again.b, lastGame([0, 3], [1, 2])) == 0 && again.note == nil, "avoid repeating last game's partners and opponents")
-        // Too few players for similar groups (under 8 per doubles court): balanced teams in queue order instead.
+        assert(Set((again.a+again.b).map(\.id)) == Set((firstTry.a+firstTry.b).map(\.id)), "history cannot change the selected group")
+        // Too few players for similar groups (under 6.25 per doubles court): balanced teams in queue order instead.
         let skills = [5.0, 2.6, 4.6, 3.0, 5.0, 4.8, 4.9, 2.8]
         func lineup(_ extra: Int) -> SessionState {
             var st = SessionState(players: (skills + Array(repeating: 3.0, count: extra)).enumerated().map { Player(name: "\($0.offset)", skill: $0.element, readyAt: Date(timeIntervalSinceNow: Double($0.offset) - 60)) })
@@ -1211,23 +2006,203 @@ struct SessionState: Codable, Equatable, Identifiable {
             return st
         }
         let few = lineup(0), many = lineup(8)
-        assert(few.balancedOnly && !many.balancedOnly, "balanced-only below 8 players per doubles court")
-        assert(Set(few.pick(.doubles, from: few.queue)!.a.map(\.name) + few.pick(.doubles, from: few.queue)!.b.map(\.name)) == ["0", "1", "2", "3"],
-               "too few players: the first in line with the next who make even teams")
+        assert(!few.balancedOnly && !many.balancedOnly, "roster-size strategy switching is paused")
+        let smallGame = few.pick(.doubles,from:few.queue)!
+        assert(abs(smallGame.a.map(\.skill).reduce(0,+)-smallGame.b.map(\.skill).reduce(0,+))/2 <= fairGap,"small rosters retain balanced matching without a separate strategy")
         let similar = many.pick(.doubles, from: many.queue)!
         assert(Set((similar.a + similar.b).map(\.name)) == ["0", "2", "4", "5"], "enough players: similar-skill groups")
-        // Ties on fewest games: the hardest to match heads the game (four strong players rather than mid-rated ones first in line).
+        // Equal counts preserve the normal waiting order, even for easier-to-match players.
         var tie = SessionState(players: [3.0, 5.0, 4.9, 4.8, 4.7, 3, 3, 3, 3, 3, 3, 3].enumerated().map { Player(name: "\($0.offset)", skill: $0.element, readyAt: Date(timeIntervalSinceNow: Double($0.offset) - 60)) })
         tie.courts = [Court(name: "C1", format: .doubles), Court(name: "C2", format: .doubles)]
         tie.players.append(contentsOf: (0..<4).map { Player(name: "x\($0)", skill: 3, readyAt: Date(timeIntervalSinceNow: Double(20 + $0) - 60)) })
         for p in tie.players { tie.results.append(GameResult(teamA: [p.id], teamB: [UUID()], winner: 0, court: "C", start: Date())) }
         let tieGame = tie.pick(.doubles, from: tie.queue)!
-        assert(Set((tieGame.a + tieGame.b).map(\.name)) == ["1", "2", "3", "4"], "on ties, the hardest to match goes first")
+        assert((tieGame.a + tieGame.b).contains { $0.name == "0" }, "on equal counts, the normal queue head goes first")
+        // Before the first game, nobody is overdue however long they've been here, so shuffle keeps working.
+        var idle = SessionState(players: (0..<12).map { Player(name: "\($0)", skill: Double(2 + $0 % 4), readyAt: Date(timeIntervalSinceNow: Double($0) - 1800)) })
+        idle.courts = [Court(name: "C1", format: .doubles)]
+        assert(idle.pick(.doubles, from: idle.queue)?.note?.contains("waited") != true, "no one is overdue before the first game")
+        // Overdue players who can't make even teams together: as many as fair teams allow play, and the note names only them.
+        var od4 = SessionState(players: [("A", 4.9), ("B", 3.0), ("C", 2.5), ("D", 2.5), ("E", 3.0), ("F", 3.0), ("G", 3.0), ("H", 3.0)].enumerated()
+            .map { Player(name: $0.element.0, skill: $0.element.1, readyAt: Date(timeIntervalSinceNow: Double($0.offset) - 60)) })
+        for i in 0..<4 {
+            od4.players[i].since = Date(timeIntervalSinceNow: -50 * 60)
+            od4.results.append(GameResult(teamA: [od4.players[i].id], teamB: [UUID()], winner: 0, court: "", start: Date(timeIntervalSinceNow: -3600)))
+        }
+        let odGame = od4.pick(.doubles, from: od4.queue)!, odNames = Set((odGame.a + odGame.b).map(\.name))
+        assert(odGame.note?.contains("waited") != true && abs(odGame.a.map(\.skill).reduce(0,+)-odGame.b.map(\.skill).reduce(0,+))/2 <= fairGap, "overdue inclusion is paused while balance remains")
+        // Streaks: matched 1.5 higher after 3 wins in a row, 1.5 lower after 3 losses; a no-result game ends a streak.
+        func res(_ w: UUID, _ l: UUID, _ winner: Int? = 0) -> GameResult { GameResult(teamA: [w], teamB: [l], winner: winner, court: "", start: Date(timeIntervalSinceNow: -600)) }
+        var stk = SessionState(players: [Player(name: "S0"), Player(name: "S1"), Player(name: "S2")])
+        let (k0, k1, k2) = (stk.players[0].id, stk.players[1].id, stk.players[2].id)
+        stk.results = [res(k0, k1), res(k0, k1), res(k0, k1)]
+        assert(stk.streakBoost(k0) == 0.5 && stk.streakBoost(k1) == -0.5 && stk.streakBoost(k2) == 0, "3 in a row: 0.5 for matching")
+        stk.results.append(res(k0, k1))
+        assert(stk.streakBoost(k0) == 1 && stk.streakBoost(k1) == -1, "each further win or loss: 0.5 more")
+        stk.results += [res(k0, k1), res(k0, k1)]
+        assert(stk.streakBoost(k0) == 1.5 && stk.streakBoost(k1) == -1.5, "capped at 1.5")
+        stk.results = [res(k0, k1), res(k0, k1), res(k0, k1)]
+        stk.results.append(res(k0, k1, nil))
+        assert(stk.streakBoost(k0) == 0.5, "a cancelled game doesn't break a streak")
+        assert(skillPresets.enumerated().allSatisfy { Int($0.element.rounded()) == $0.offset + 1 }, "each level preset reads as its own level")
+        // Standings: ranked from 75% of the median games played; a corrected winner moves ratings as if it had been entered right.
+        var night = SessionState(players: (0..<6).map { Player(name: "\($0)", skill: 3) })
+        let ids = night.players.map(\.id)
+        for (i, games) in [9, 9, 9, 10, 4, 5].enumerated() {
+            for _ in 0..<games { night.results.append(GameResult(teamA: [ids[i]], teamB: [UUID()], winner: 0, court: "", start: .distantPast)) }
+        }
+        assert(night.rankingMinimum == 7, "ranked from 75% of the median games played")
+        var fix = SessionState(players: (0..<4).map { Player(name: "\($0)", skill: 3) })
+        let f = fix.players.map(\.id)
+        fix.results = [GameResult(teamA: [f[0], f[1]], teamB: [f[2], f[3]], winner: 0, court: "", start: Date(timeIntervalSinceNow: -600))]
+        var right = fix
+        right.results = []
+        right.courts = [Court(name: "C", format: .doubles)]
+        right.courts[0].match = Match(teamA: [f[0], f[1]], teamB: [f[2], f[3]], start: fix.results[0].start)
+        right.finish(right.courts[0].id, winner: 1, at: fix.results[0].end)
+        let wrongSkills = fix.players.map(\.skill)
+        fix.results[0].changes = Dictionary(uniqueKeysWithValues: f.map { ($0, 0.0) }) // stand-in for the change the wrong result made
+        fix.setWinner(0, 1)
+        assert(fix.players.map(\.skill) == right.players.map(\.skill) && wrongSkills.allSatisfy { $0 == 3 }, "a corrected winner moves ratings as if entered right")
+        fix.setWinner(0, nil)
+        assert(fix.players.allSatisfy { $0.skill == 3 } && fix.games.isEmpty, "corrected to cancelled: no rating change, not a game")
+        // Streaks on the rating dots: red into the empty dots, blue over the top filled ones, half a dot per 0.5; a ring past the dots.
+        let dots = { (f: Int, b: Double) in SkillDots.streak(filled: f, boost: b) }
+        assert(!dots(5, 0).fire && !dots(3, 1.5).fire && dots(4, 1.5).fire, "fire only when a win streak overflows the dots")
+        assert(!dots(1, -1.5).fire, "losing streaks never show fire")
+        assert(dots(3, 0.5).parts == [0, 0, 0, 0.5, 0] && !dots(3, 0.5).ring && dots(3, 1.5).parts == [0, 0, 0, 1, 0.5], "win streak dots")
+        assert(dots(3, -1).parts == [0, 0, 1, 0, 0] && dots(3, -0.5).parts == [0, 0, 0.5, 0, 0], "losing streak dots")
+        // Wait clock (the queue's minutes and the 20-minute rule): nothing before the first game, then from the last game or arrival.
+        var wc = SessionState(players: [Player(name: "W", readyAt: Date(timeIntervalSinceNow: -3000))])
+        assert(wc.waitStart(wc.players[0]).timeIntervalSinceNow > -1, "before the first game nobody's clock runs")
+        wc.results = [GameResult(teamA: [UUID()], teamB: [UUID()], winner: 0, court: "", start: Date(timeIntervalSinceNow: -3600))]
+        assert(abs(wc.waitStart(wc.players[0]).timeIntervalSinceNow + 3000) < 1, "a late arrival waits from arriving")
+        wc.players[0].since = Date(timeIntervalSinceNow: -600)
+        wc.players[0].paused = true
+        assert(abs(wc.waitStart(wc.players[0]).timeIntervalSinceNow + 600) < 1, "from their last game; sitting out doesn't restart it")
+        assert(dots(5, 0.5).fire && !dots(5, 0.5).ring && dots(1, -1.5).parts == [1, 0, 0, 0, 0] && dots(1, -1.5).ring && dots(3, 0).parts == [0, 0, 0, 0, 0], "fire for overflowing wins; blue rings for overflowing losses")
+        // A cancelled game isn't a game: no count, no rating, nobody just off, and the four are back where they were in line.
+        var cx = SessionState(players: (0..<8).map { Player(name: "\($0)", skill: 3, readyAt: Date(timeIntervalSinceNow: Double($0) - 60)) },
+                              courts: [Court(name: "C", format: .doubles)])
+        let lineBefore = cx.queue.map(\.id), ratingsBefore = cx.players.map(\.skill)
+        cx.fill(cx.courts[0].id)
+        let cancelled = cx.courts[0].match!
+        cx.finish(cx.courts[0].id, winner: nil)
+        assert(cx.queue.map(\.id) == lineBefore && cx.players.map(\.skill) == ratingsBefore, "a cancelled game leaves the line and ratings as they were")
+        assert(cx.results.count == 1 && cx.games.isEmpty && cx.players.allSatisfy { cx.played($0.id) == 0 && cx.gamesCounted[$0.id] == 0 },
+               "a cancelled game is kept in the history but counts for nobody")
+        // End Session cancels whatever is on court and marks the session ended.
+        cx.fill(cx.courts[0].id)
+        cx.end()
+        assert(cx.ended != nil && cx.onCourt.isEmpty && cx.results.count == 2 && cx.games.isEmpty, "End Session cancels games on court")
+        // The first player added to an empty session dates it today.
+        var later = SessionState(date: .distantPast)
+        later.addPlayer("A", skill: 3)
+        assert(Calendar.current.isDateInToday(later.date), "an empty session takes the date its first player is added")
+        // Saved data from before live sessions: earlier sessions count as ended, the current one stays live.
+        struct OldStore: Encodable { var current: SessionState, past: [SessionState] }
+        let oldSave = try! JSONEncoder().encode(OldStore(current: SessionState(),
+            past: [SessionState(results: [GameResult(teamA: [], teamB: [], winner: 0, court: "", start: .distantPast, end: .distantPast)])]))
+        let migrated = try! JSONDecoder().decode(Store.self, from: oldSave)
+        assert(migrated.sessions.count == 2 && migrated.sessions[0].ended == .distantPast && migrated.sessions[1].isLive, "old saves: past ended, current live")
+        // Length: ends that many hours after the first game; reopen makes it live again.
+        var timed = SessionState(results: [GameResult(teamA: [], teamB: [], winner: 0, court: "", start: .distantPast)])
+        timed.hours = 2.5
+        timed.end()
+        timed.reopen()
+        assert(timed.endsAt == Date.distantPast.addingTimeInterval(9000) && timed.isLive, "ends 2.5 h after the first game; reopen clears ended")
+        // All Players edits apply in every session.
+        var pool = [SessionState(players: [Player(name: "Ana", skill: 3)]), SessionState(players: [Player(name: "ana", skill: 2.5), Player(name: "Bo")])]
+        SessionState.editEverywhere(name: "Ana", to: "Anna", skill: 4.2, in: &pool)
+        assert(pool.allSatisfy { $0.players[0].name == "Anna" && $0.players[0].skill == 4.2 } && pool[1].players[1].name == "Bo", "an All Players edit applies everywhere")
+        // A 5.0 can make a similar-skill game only if the 3.0 on a win streak counts as 4.5; the game hands back real players.
+        var hot = SessionState(players: [5, 3, 4.2, 4.2, 3, 3, 3, 3, 3, 3, 3, 3].enumerated().map { Player(name: "\($0.offset)", skill: $0.element, readyAt: Date(timeIntervalSinceNow: Double($0.offset) - 60)) })
+        hot.courts = [Court(name: "C1", format: .doubles)]
+        let gx = UUID(), gy = UUID()
+        for w in [0, 1, 0, 1] { hot.results.append(GameResult(teamA: [hot.players[0].id], teamB: [gx], winner: w, court: "", start: Date(timeIntervalSinceNow: -600))) }
+        for _ in 0..<5 { hot.results.append(GameResult(teamA: [hot.players[1].id], teamB: [gx], winner: 0, court: "", start: Date(timeIntervalSinceNow: -600))) }
+        for p in hot.players.dropFirst(2) {
+            for w in [0, 1, 0, 1, 0] { hot.results.append(GameResult(teamA: [p.id], teamB: [gx], winner: w, court: "", start: Date(timeIntervalSinceNow: -600))) }
+        }
+        hot.results.append(GameResult(teamA: [gx], teamB: [gy], winner: 0, court: "", start: Date(timeIntervalSinceNow: -600)))
+        let hotGame = hot.pick(.doubles, from: hot.queue)!
+        assert(Set((hotGame.a + hotGame.b).map(\.name)) == ["0", "1", "2", "3"] && (hotGame.a + hotGame.b).first { $0.name == "1" }?.skill == 3,
+               "a 5-win streak is matched 1.5 higher (3.0 plays as 4.5); real players and ratings handed back")
+        // Lock + shuffle and Replace judge evenness on ratings with streak boosts: a 2.6 on 5 wins plays a 4.0 as an even singles game.
+        var ev = SessionState(players: [Player(name: "Hot", skill: 2.6), Player(name: "Four", skill: 4.0)])
+        for _ in 0..<5 { ev.results.append(GameResult(teamA: [ev.players[0].id], teamB: [gx], winner: 0, court: "", start: Date())) }
+        assert(abs(ev.unevenness([ev.players[0].id], [ev.players[1].id]) - 0.1) < 1e-9 && ev.isEven([ev.players[0].id], [ev.players[1].id]), "evenness uses boosted ratings")
+        // Hot/cold teaming: a 3-win and a 3-loss player within 1.0 level are teammates, against even opponents.
+        var hc = SessionState(players: [3.2, 3.6, 3.0, 3.4, 3.1, 3.3, 3.5, 3.2, 3.0, 3.4].enumerated().map { Player(name: "\($0.offset)", skill: $0.element, readyAt: Date(timeIntervalSinceNow: Double($0.offset) - 60)) })
+        hc.courts = [Court(name: "C1", format: .doubles)]
+        func g1(_ id: UUID, _ won: Bool) -> GameResult { GameResult(teamA: [id], teamB: [gx], winner: won ? 0 : 1, court: "", start: Date(timeIntervalSinceNow: -600)) }
+        for _ in 0..<3 { hc.results += [g1(hc.players[0].id, true), g1(hc.players[5].id, false)] }
+        for p in hc.players where p.name != "0" && p.name != "5" { hc.results += [g1(p.id, true), g1(p.id, false), g1(p.id, true)] }
+        hc.results.append(GameResult(teamA: [gx], teamB: [gy], winner: 0, court: "", start: Date(timeIntervalSinceNow: -600)))
+        let hcGame = hc.pick(.doubles, from: hc.queue)!, hcTeam = [hcGame.a, hcGame.b].first { $0.contains { $0.name == "0" } }
+        assert(hcTeam?.contains { $0.name == "5" } == true, "hot and cold teamed up")
+        // Late arrivals: the first few go first, the rest join at par in arrival order; at most 2 on their first game in a game.
+        var wave = SessionState(players: (0..<12).map { Player(name: "R\($0)", readyAt: Date(timeIntervalSinceNow: Double($0) - 60)) })
+        wave.courts = [Court(name: "C1", format: .doubles), Court(name: "C2", format: .doubles)]
+        for p in wave.players { wave.results.append(GameResult(teamA: [p.id], teamB: [gx], winner: 0, court: "", start: Date(timeIntervalSinceNow: -3600))) }
+        for k in 0..<6 { wave.addPlayer("L\(k)", skill: 3, rated: nil) }
+        let waveLine = wave.queue.map(\.name)
+        assert(["L0", "L1", "L2", "L3"].allSatisfy { (waveLine.firstIndex(of: $0) ?? 99) < 4 } && waveLine.firstIndex(of: "L4")! > waveLine.firstIndex(of: "R0")!,
+               "late arrivals: 4 go first, then at par")
+        let waveGame = wave.pick(.doubles, from: wave.queue)!
+        assert((waveGame.a + waveGame.b).filter { $0.name.hasPrefix("L") }.count <= latePerGame, "at most 2 late arrivals on their first game in one game")
+        // Ratings settle faster for a new player's first games, slower for regulars.
+        var rk = SessionState(players: [Player(name: "N", rated: 0), Player(name: "M", rated: newGames), Player(name: "O")])
+        assert(rk.kFactor(rk.players[0].id) == newK && rk.kFactor(rk.players[1].id) == regK && rk.kFactor(rk.players[2].id) == regK, "rating speed by experience")
+        rk.players[0].rated = newGames - 1
+        rk.results.append(GameResult(teamA: [rk.players[0].id], teamB: [gx], winner: 0, court: "", start: Date()))
+        assert(rk.kFactor(rk.players[0].id) == regK, "after 8 rated games a new player settles to the regular speed")
+        // The court names someone overdue only after 25 minutes.
+        var due = SessionState(players: (0..<8).map { Player(name: "W\($0)", readyAt: Date(timeIntervalSinceNow: Double($0) - 60)) })
+        due.players[7].since = Date(timeIntervalSinceNow: -22 * 60)
+        due.results.append(GameResult(teamA: [due.players[7].id], teamB: [gx], winner: 0, court: "", start: Date(timeIntervalSinceNow: -3600)))
+        let dueGame = due.pick(.doubles, from: due.queue)!
+        assert(!(dueGame.a+dueGame.b).contains { $0.name == "W7" } && dueGame.note?.contains("waited") != true, "20-minute waits do not override fewer games")
+        // New session with the same players keeps locked teammates and rated-game counts.
+        var carry = SessionState(players: [Player(name: "A", rated: 2), Player(name: "B"), Player(name: "C")])
+        carry.results.append(GameResult(teamA: [carry.players[0].id], teamB: [carry.players[1].id], winner: 0, court: "", start: Date()))
+        carry.setLock(carry.players[0].id, carry.players[1].id)
+        let nxt = carry.next(keepPlayers: true)
+        assert(nxt.players[0].lock == nxt.players[1].id && nxt.players[1].lock == nxt.players[0].id && nxt.players[0].rated == 3 && nxt.players[1].rated == nil,
+               "next session keeps locks and rated counts")
+        // Balanced-only below 6.25 players per court: 13 on 2 courts plays similar groups, 12 balanced.
+        var bal = SessionState(players: (0..<13).map { Player(name: "B\($0)") })
+        bal.courts = [Court(name: "C1", format: .doubles), Court(name: "C2", format: .doubles)]
+        assert(!bal.balancedOnly, "13 players on 2 courts: similar groups")
+        bal.players.removeLast()
+        assert(!bal.balancedOnly, "small roster uses the same matching strategy")
+        // Start begins the game on screen, even if someone became overdue (20 min) since the screen was drawn.
+        var drift = SessionState(players: (0..<9).map { Player(name: "D\($0)", readyAt: Date(timeIntervalSinceNow: Double($0) - 60)) })
+        drift.courts = [Court(name: "C1", format: .doubles)]
+        let sx = UUID()
+        for p in drift.players { drift.results.append(GameResult(teamA: [p.id], teamB: [sx], winner: 0, court: "", start: Date(timeIntervalSinceNow: -3600))) }
+        drift.results.append(GameResult(teamA: [drift.players[8].id], teamB: [sx], winner: 0, court: "", start: Date(timeIntervalSinceNow: -3600)))
+        drift.update(drift.players[8].id) { $0.since = Date(timeIntervalSinceNow: -19.5 * 60) }
+        let drawn = drift.nextPairing(for: drift.courts[0])!
+        SessionState.simulatedNow = Date(timeIntervalSinceNow: 120)
+        let afterDrift = drift.nextPairing(for: drift.courts[0])!
+        drift.fill(drift.courts[0].id, shown: drawn, at: SessionState.now)
+        SessionState.simulatedNow = nil
+        assert(Set((drawn.a+drawn.b).map(\.id)) == Set((afterDrift.a+afterDrift.b).map(\.id))
+               && drift.courts[0].match.map { Set($0.teamA + $0.teamB) } == Set((drawn.a + drawn.b).map(\.id)), "Start begins the game on screen")
+        // Even games: the four on 0 games play (a 5.0, 4.0 and two 3.0s, balanced) rather than the 4.8 on 1 game who'd make a closer
+        // range, which would leave a 0-game player waiting while someone reaches 2.
+        var evn = SessionState(players: [5.0, 4.0, 3.0, 3.0, 5.0, 4.9, 4.8].enumerated().map { Player(name: "\($0.offset)", skill: $0.element, readyAt: Date(timeIntervalSinceNow: Double($0.offset) - 60)) })
+        evn.courts = [Court(name: "C1", format: .doubles)]
+        let ex = UUID(), ey = UUID()
+        for p in evn.players.dropFirst(4) { evn.results.append(GameResult(teamA: [p.id], teamB: [ex], winner: 0, court: "", start: Date(timeIntervalSinceNow: -600))) }
+        evn.results.append(GameResult(teamA: [ex], teamB: [ey], winner: 0, court: "", start: Date(timeIntervalSinceNow: -600)))
+        let evGame = evn.pick(.doubles, from: evn.queue)!
+        assert(!evn.balancedOnly && Set((evGame.a + evGame.b).map(\.name)) == ["0", "1", "2", "3"], "even games: nobody plays again while someone with fewer games waits")
         // Four rested but no fair game among them: they play anyway, strongest with weakest, rather than call anyone back.
         let four = [5.0, 3.1, 3.3, 3.2, 4.5, 2.9, 3.0, 3.6].enumerated().map { Player(name: "\($0.offset)", skill: $0.element) }
         let rest4 = pickDoubles(four, justOff: Set(four[4...].map(\.id)))!
-        assert(Set((rest4.a + rest4.b).map(\.name)) == ["0", "1", "2", "3"] && [rest4.a, rest4.b].contains { Set($0.map(\.name)) == ["0", "1"] }
-               && rest4.note?.contains("straight back") == true, "four rested play, strongest with weakest, nobody called back")
+        assert(abs(rest4.a.map(\.skill).reduce(0,+)-rest4.b.map(\.skill).reduce(0,+))/2 <= fairGap, "balanced recall precedes an uneven rested game")
         // Fewest games before fewest repeats: A, B and C (1 game each) play although A and B met last game; D, E, F have 3.
         let fg = ["H", "A", "B", "C", "D", "E", "F"].map { Player(name: $0) }
         let fgGame = pickDoubles(fg, recent: [fg[1].id: ([], [fg[2].id]), fg[2].id: ([], [fg[1].id])],
@@ -1239,7 +2214,7 @@ struct SessionState: Codable, Equatable, Identifiable {
         var topRecent: Recent = [:]
         for i in 0..<4 { topRecent[top[i].id] = (Set([top[i ^ 1].id]), Set((0..<4).filter { $0 / 2 != i / 2 }.map { top[$0].id })) }
         let mixedUp = pickDoubles(top, recent: topRecent)!
-        assert(mixedUp.note == "mixed teams for new partners" && repeats(mixedUp.a, mixedUp.b, topRecent) < repeatLimit, "balanced teams break up a repeat")
+        assert(Set((mixedUp.a+mixedUp.b).map(\.id)) == Set(top.prefix(4).map(\.id)), "repeated foursomes retain their turns")
         let reg = registry([newer, old])
         assert(reg.map(\.name) == ["ana", "Ben"] && reg[0].sessions == 2 && reg[0].skill == 4, "registry merges people by name")
         let s = pickSingles([5, 1, 4, 5].map { Player(name: "\($0)", skill: Double($0)) })!
@@ -1302,6 +2277,7 @@ enum Simulation {
 
     struct Game {
         var minute: Double, length: Double, court: String, a: Side, b: Side
+        var initialA: Side = [], initialB: Side = []
         var aWon = false, note: String?, straightBack: [String]
         var spread: Double { let s = (a + b).map(\.skill); return s.max()! - s.min()! }
         var gap: Double { abs(Simulation.avg(a) - Simulation.avg(b)) }
@@ -1310,9 +2286,23 @@ enum Simulation {
     /// A wait of 35 minutes or more: who, when, and how their games compared with everyone's when it began.
     struct LongWait { var name: String, skill: Double, minutes: Double, from: Double, to: Double, games: Int, groupAverage: Double }
 
-    struct Night { var games: [Game] = []; var waits: [String: [Double]] = [:]; var long: [LongWait] = []; var pairGameGaps: [Double] = []; var plannedPairGames: [Int] = [] }
+    struct Night { var games: [Game] = []; var waits: [String: [Double]] = [:]; var long: [LongWait] = []; var unfinished: [String: Double] = [:]; var neverPlayed: [String] = [] }
 
     static func avg(_ side: Side) -> Double { side.map(\.skill).reduce(0, +) / Double(side.count) }
+
+    static func selfCheck() {
+        var fresh = SessionState(players: (0..<8).map { Player(name: "S\($0)", skill: 3) })
+        fresh.courts = [Court(name: "C1", format: .doubles)]
+        var saved = fresh
+        for i in saved.players.indices { saved.players[i].since = Date(); saved.players[i].credit = i.isMultiple(of: 2) ? 7 : nil }
+        let a = run(fresh, minutes: 30, length: 600...840, late: [], arrival: 3600, seed: 1)
+        let b = run(saved, minutes: 30, length: 600...840, late: [], arrival: 3600, seed: 1)
+        assert(a.games.map { ($0.a + $0.b).map(\.name) } == b.games.map { ($0.a + $0.b).map(\.name) } && a.waits == b.waits, "saved timestamps and arrival credits must not change a fresh simulated night")
+        assert(a.games.contains { $0.a.map(\.skill) != $0.initialA.map(\.skill) || $0.b.map(\.skill) != $0.initialB.map(\.skill) }, "simulated match ratings update independently from starting strength")
+        fresh.players = Array(fresh.players.prefix(5))
+        let closing = run(fresh, minutes: 1, length: 600...840, late: [], arrival: 3600, seed: 1)
+        assert(closing.neverPlayed.count == 1 && closing.unfinished.count == 1 && closing.unfinished.values.first == 1, "an unserved player is included in unfinished waits at closing")
+    }
 
     /// Everyone present from the start; courts refill the moment they free up. Game lengths are drawn from
     /// `lengths`; winners are drawn from each side's starting rating (their "true" strength, which stays fixed).
@@ -1324,7 +2314,7 @@ enum Simulation {
         s.tournament = nil
         s.courts = s.courts.map { Court(id: $0.id, name: $0.name, format: $0.format) }
         s.players = s.players.enumerated().map { n, p in
-            var q = p; q.readyAt = t0.addingTimeInterval(Double(n) * 0.001); q.first = nil; q.paused = false; q.away = nil; return q
+            var q = p; q.readyAt = t0.addingTimeInterval(Double(n) * 0.001); q.first = nil; q.paused = false; q.away = nil; q.since = nil; q.credit = nil; return q
         }
         // Latecomers join `arrival` seconds in, added the way the app adds someone who turns up.
         let latecomers = s.players.filter { late.contains($0.name) }
@@ -1364,19 +2354,19 @@ enum Simulation {
                         }
                     }
                     night.games.append(Game(minute: t.timeIntervalSince(t0) / 60, length: length / 60, court: c.name,
-                                            a: p.a.map { ($0.name, truth[$0.id]!) }, b: p.b.map { ($0.name, truth[$0.id]!) },
+                                            a: p.a.map { ($0.name, $0.skill) }, b: p.b.map { ($0.name, $0.skill) },
+                                            initialA: p.a.map { ($0.name, truth[$0.id]!) }, initialB: p.b.map { ($0.name, truth[$0.id]!) },
                                             note: p.note, straightBack: (p.a + p.b).filter { lastEnd[$0.id] == t }.map(\.name)))
-                    if s.isPairGame(p.a.map(\.id), p.b.map(\.id)) { // evenness by the ratings the app used at the time
-                        night.pairGameGaps.append(abs(p.a.map(\.skill).reduce(0, +) - p.b.map(\.skill).reduce(0, +)) / 2)
-                        night.plannedPairGames.append(night.games.count - 1)
-                    }
                     s.fill(c.id, at: t)
                     ends[c.id] = (t.addingTimeInterval(length), night.games.count - 1)
                 }
             }
             let soonest = ends.min(by: { $0.value.end < $1.value.end })
             if !arrived, soonest.map({ arriveAt <= $0.value.end }) ?? true { t = arriveAt; continue }
-            guard let (cid, next) = soonest, let m = s.courts.first(where: { $0.id == cid })?.match else { break }
+            guard let (cid, next) = soonest, let m = s.courts.first(where: { $0.id == cid })?.match else {
+                if t < t0.addingTimeInterval(minutes*60), s.courts.contains(where: { s.eligible($0.format).count >= $0.format.needed }) { t=t.addingTimeInterval(30); continue }
+                break
+            }
             let pA = 1 / (1 + pow(10, (strength(m.teamB) - strength(m.teamA)) / SessionState.ratingSpread))
             let aWon = Double.random(in: 0..<1, using: &rng) < pA
             night.games[next.game].aWon = aWon
@@ -1387,102 +2377,16 @@ enum Simulation {
             ends[cid] = nil
             t = next.end
         }
+        // Include players still waiting at closing; they never appear in a completed-wait sample.
+        for p in s.players {
+            let mine = night.games.filter { ($0.a + $0.b).contains { $0.name == p.name } }
+            if mine.isEmpty { night.neverPlayed.append(p.name) }
+            guard !mine.contains(where: { $0.minute < minutes && $0.minute + $0.length > minutes }) else { continue }
+            let last = mine.map { $0.minute + $0.length }.filter { $0 <= minutes }.max() ?? (late.contains(p.name) ? arrival / 60 : 0)
+            night.unfinished[p.name] = max(0, minutes - last)
+        }
         SessionState.simulatedNow = nil
         return night
-    }
-
-    /// `-pairsweep` with `-pairs "A,B;C,D;E,F"` (and `-courts N`): pair requests against none. Did each pair get its game,
-    /// how even was it, did pair games ever overlap or share a game, and what did it cost everyone else?
-    /// Writes Documents/sim-pairsweep.md.
-    static func pairSweep() {
-        guard let store = input() else { return }
-        let args = ProcessInfo.processInfo.arguments
-        guard let i = args.firstIndex(of: "-pairs"), i + 1 < args.count else { return }
-        let pairs = args[i + 1].split(separator: ";").compactMap { p -> (String, String)? in
-            let n = p.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }; return n.count == 2 ? (n[0], n[1]) : nil }
-        var base = store.current
-        let courts = args.firstIndex(of: "-courts").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil } ?? 2
-        base.courts = (1...courts).map { Court(name: "Court \($0)", format: .doubles) }
-        base.players = base.players.map { var p = $0; p.partner = nil; return p } // requests come only from -pairs
-        let skill = Dictionary(base.players.map { ($0.name, $0.skill) }, uniquingKeysWith: { a, _ in a })
-        let runs = 30, length: ClosedRange<TimeInterval> = 10 * 60...14 * 60
-        func mean(_ x: [Double]) -> Double { x.isEmpty ? 0 : x.reduce(0, +) / Double(x.count) }
-        func f(_ x: Double) -> String { String(format: "%.1f", x) }
-        func has(_ g: Game, _ n: String) -> Bool { (g.a + g.b).contains { $0.name == n } }
-        func together(_ g: Game, _ x: String, _ y: String) -> Bool { [g.a, g.b].contains { s in s.contains { $0.name == x } && s.contains { $0.name == y } } }
-        func clock(_ m: Double) -> String { String(format: "%d:%02d", Int(m) / 60, Int(m) % 60) }
-        let paired = Set(pairs.flatMap { [$0.0, $0.1] }), rest = Set(base.players.map(\.name)).subtracting(paired)
-        var out = "# \(pairs.count) pair requests against none\n\n\(base.players.count) players · \(courts) doubles courts · 3 hours · games 10–14 min · \(runs) nights each · same random draws\n\nPairs: "
-            + pairs.map { "\($0.0) \(f(skill[$0.0] ?? 0)) & \($0.1) \(f(skill[$0.1] ?? 0))" }.joined(separator: " · ") + "\n\n"
-        var pairTable = "## Each pair's game together\n\n| Pair | Ratings | Nights they got it | Times together per night | First together at (avg) | Team gap in that game | Rating range in that game | Games each per night | Same with no request: together per night |\n|---|---|---|---|---|---|---|---|---|\n"
-        var groupTable = "## Conflicts and everyone else, per night\n\n| | Pair games at the same time | Two pairs in one game | Paired players' games | Others' games | Average wait | Longest wait | Waits over 30 min (others) | All four within 1 level | Team gap |\n|---|---|---|---|---|---|---|---|---|---|\n"
-        var withoutTogether: [String: Double] = [:], conflictDetail: String?
-        for requests in [false, true] {
-            var s0 = base
-            if requests {
-                for (x, y) in pairs {
-                    if let a = s0.players.first(where: { $0.name == x }), let b = s0.players.first(where: { $0.name == y }) { s0.setPartner(a.id, b.id) }
-                }
-            }
-            let nights = (1...UInt64(runs)).map { run(s0, minutes: 180, length: length, late: [], arrival: 0, seed: $0) }
-            let name = requests ? "With requests" : "No requests"
-            var firstGames: [[Game]] = Array(repeating: [], count: nights.count) // each night's pair games (first time together)
-            for (x, y) in pairs {
-                var games: [Double] = [], tog: [Double] = [], got = 0, at: [Double] = [], gap: [Double] = [], range: [Double] = []
-                for (k, n) in nights.enumerated() {
-                    games.append(Double(n.games.filter { has($0, x) }.count + n.games.filter { has($0, y) }.count) / 2)
-                    let mine = n.games.filter { together($0, x, y) }.sorted { $0.minute < $1.minute }
-                    tog.append(Double(mine.count))
-                    if let g = mine.first { got += 1; at.append(g.minute); gap.append(g.gap); range.append(g.spread); firstGames[k].append(g) }
-                }
-                if !requests { withoutTogether["\(x)&\(y)"] = mean(tog); continue }
-                pairTable += "| \(x) & \(y) | \(f(skill[x] ?? 0)) & \(f(skill[y] ?? 0)) | \(got) of \(runs) | \(f(mean(tog))) | \(at.isEmpty ? "–" : clock(mean(at))) | \(String(format: "%.2f", mean(gap))) (worst \(String(format: "%.2f", gap.max() ?? 0))) | \(f(mean(range))) (widest \(f(range.max() ?? 0))) | \(f(mean(games))) | \(f(withoutTogether["\(x)&\(y)"] ?? 0)) |\n"
-            }
-            let planned = nights.flatMap(\.pairGameGaps)
-            if requests { out += "Pair games made: \(planned.count) over \(runs) nights · team gap by the ratings at the time: average \(String(format: "%.2f", mean(planned))), worst \(String(format: "%.2f", planned.max() ?? 0)) · over 0.25: \(planned.filter { $0 > SessionState.pairSlack + 1e-9 }.count)\n\n" }
-            if requests {
-                var lines: [String] = []
-                for (k, n) in nights.enumerated() {
-                    let pgs = firstGames[k]
-                    for i in pgs.indices { for j in pgs.indices where j > i {
-                        let a = pgs[i], b = pgs[j]
-                        guard a.minute < b.minute + b.length - 1e-6 && b.minute < a.minute + a.length - 1e-6 else { continue }
-                        let planned = { (g: Game) in n.games.firstIndex { $0.minute == g.minute && $0.court == g.court }.map { n.plannedPairGames.contains($0) } ?? false }
-                        lines.append("- Night \(k + 1): \(a.court) \(clock(a.minute))–\(clock(a.minute + a.length)) \(a.a.map(\.name)) v \(a.b.map(\.name)) (planned: \(planned(a))) overlaps \(b.court) \(clock(b.minute))–\(clock(b.minute + b.length)) \(b.a.map(\.name)) v \(b.b.map(\.name)) (planned: \(planned(b)))")
-                    } }
-                    for g in n.games where pairs.filter({ together(g, $0.0, $0.1) }).count >= 2 {
-                        lines.append("- Night \(k + 1): two pairs in one game: \(g.court) \(clock(g.minute)) \(g.a.map(\.name)) v \(g.b.map(\.name))")
-                    }
-                }
-                conflictDetail = lines.isEmpty ? nil : lines.joined(separator: "\n") + "\n"
-            }
-            var overlap: [Double] = [], two: [Double] = [], pg: [Double] = [], og: [Double] = [], avgWait: [Double] = [], longest: [Double] = [],
-                over30: [Double] = [], within1: [Double] = [], gaps: [Double] = []
-            for (k, n) in nights.enumerated() {
-                let pgs = firstGames[k]
-                func overlaps(_ a: Game, _ b: Game) -> Bool { a.minute < b.minute + b.length - 1e-6 && b.minute < a.minute + a.length - 1e-6 }
-                var count = 0
-                for i in pgs.indices { for j in pgs.indices where j > i && overlaps(pgs[i], pgs[j]) { count += 1 } }
-                overlap.append(Double(count))
-                two.append(Double(n.games.filter { g in pairs.filter { together(g, $0.0, $0.1) }.count >= 2 }.count))
-                let names = n.games.flatMap { ($0.a + $0.b).map(\.name) }
-                pg.append(Double(names.filter(paired.contains).count) / Double(paired.count))
-                og.append(Double(names.filter(rest.contains).count) / Double(rest.count))
-                var lastEnd: [String: Double] = [:], waits: [Double] = [], who: [String] = []
-                for g in n.games.sorted(by: { $0.minute < $1.minute }) {
-                    for p in g.a + g.b { waits.append(g.minute - (lastEnd[p.name] ?? 0)); who.append(p.name); lastEnd[p.name] = g.minute + g.length }
-                }
-                avgWait.append(mean(waits)); longest.append(waits.max() ?? 0)
-                over30.append(Double(zip(waits, who).filter { $0.0 > 30 && rest.contains($0.1) }.count))
-                within1.append(Double(n.games.filter { $0.spread <= 1 + 1e-9 }.count) / Double(max(1, n.games.count)))
-                gaps.append(mean(n.games.map(\.gap)))
-            }
-            groupTable += "| \(name) | \(requests ? f(mean(overlap)) : "–") | \(f(mean(two))) | \(f(mean(pg))) | \(f(mean(og))) | \(f(mean(avgWait))) min | \(Int(longest.max() ?? 0)) min | \(f(mean(over30))) | \(Int((mean(within1) * 100).rounded()))% | \(String(format: "%.2f", mean(gaps))) |\n"
-        }
-        out += pairTable + "\n" + groupTable
-        if let detail = conflictDetail { out += "\n## Conflicts in detail\n\n" + detail }
-        try? out.write(to: URL.documentsDirectory.appending(path: "sim-pairsweep.md"), atomically: true, encoding: .utf8)
-        print(out)
     }
 
     /// `-waitsweep`: the longest waits and game quality for several overdue triggers, 2 doubles courts, 3 hours.
@@ -1520,23 +2424,32 @@ enum Simulation {
         print(out)
     }
 
-    /// `-parity` (with `-courts N`, optional `-pairs "A,B;C,D"`): one night with nothing random (game k lasts 10 + k % 5 minutes,
+    /// `-parity` (with `-courts N`, optional `-locks "A,B;C,D"`): one night with nothing random (game k lasts 10 + k % 5 minutes,
     /// the side with the higher starting ratings wins), written to Documents/parity.txt as the lineups in order, to compare
     /// line by line with the web version playing the same night (tools/web-sim.js --parity).
     static func parity() {
         guard var s = input()?.current else { return }
         let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-queue-matching"), i + 1 < args.count, let mode = QueueMatching(rawValue: args[i+1]) { s.queueMatching = mode }
         let courts = args.firstIndex(of: "-courts").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil } ?? 3
         let t0 = Date(timeIntervalSinceReferenceDate: 0)
         s.results = []; s.tournament = nil
         s.courts = (1...courts).map { Court(name: "Court \($0)", format: .doubles) }
         s.players = s.players.enumerated().map { n, p in
-            var q = p; q.readyAt = t0.addingTimeInterval(Double(n) * 0.001); q.since = nil; q.first = nil; q.paused = false; q.away = nil; q.credit = nil; q.partner = nil; return q
+            var q = p; q.readyAt = t0.addingTimeInterval(Double(n) * 0.001); q.since = nil; q.first = nil; q.paused = false; q.away = nil; q.credit = nil; q.lock = nil; return q
         }
-        if let i = args.firstIndex(of: "-pairs"), i + 1 < args.count {
+        if let i = args.firstIndex(of: "-locks"), i + 1 < args.count { // locked teammates
             for pair in args[i + 1].split(separator: ";") {
                 let n = pair.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-                if n.count == 2, let a = s.players.first(where: { $0.name == n[0] }), let b = s.players.first(where: { $0.name == n[1] }) { s.setPartner(a.id, b.id) }
+                if n.count == 2, let a = s.players.first(where: { $0.name == n[0] }), let b = s.players.first(where: { $0.name == n[1] }) { s.setLock(a.id, b.id) }
+            }
+        }
+        s.scheduled = nil; s.scheduleUnlocked = nil; s.ended = nil
+        if let i = args.firstIndex(of: "-scheduled"), i + 1 < args.count {
+            s.hours = 3; SessionState.simulatedNow = t0
+            for item in args[i+1].split(separator: ";") {
+                let sides = item.split(separator: "|").map { $0.split(separator: ",").compactMap { name in s.players.first { $0.name == name.trimmingCharacters(in: .whitespaces) }?.id } }
+                if sides.count == 2 { _ = s.scheduleMatch(.doubles, a: sides[0], b: sides[1]) }
             }
         }
         let truth = Dictionary(uniqueKeysWithValues: s.players.map { ($0.id, $0.skill) })
@@ -1546,8 +2459,19 @@ enum Simulation {
             SessionState.simulatedNow = t
             if t < t0.addingTimeInterval(180 * 60) {
                 for (ci, c) in s.courts.enumerated() where c.match == nil {
+                    let line = s.eligible(.doubles), locks = s.lockContext(line), held = Set(locks.flatMap { [$0.x, $0.y] })
+                    for l in locks where !l.apart {
+                        guard let x = s.player(l.x), let y = s.player(l.y) else { continue }
+                        let others = line.filter { !held.contains($0.id) }
+                        let best = others.indices.dropFirst().flatMap { j in (0..<j).map { i in [others[i], others[j]] } }
+                            .max { s.averageSkill($0.map(\.id)) < s.averageSkill($1.map(\.id)) }
+                        if let best, t.timeIntervalSince(s.waitStart(x)) < SessionState.waitCap,
+                           s.averageSkill(best.map(\.id)) < (x.skill + y.skill) / 2 - SessionState.lockEqual {
+                            lines.append("\(Int(t.timeIntervalSince(t0) / 60)) \(c.name): WAIT \(x.name)+\(y.name) avg \(String(format: "%.2f", (x.skill + y.skill) / 2)); strongest free pair \(best.map(\.name).joined(separator: "+")) avg \(String(format: "%.2f", s.averageSkill(best.map(\.id))))")
+                        }
+                    }
                     guard let p = s.nextPairing(for: c) else { continue }
-                    lines.append("\(Int(t.timeIntervalSince(t0) / 60)) \(c.name): \(p.a.map(\.name).joined(separator: "+")) v \(p.b.map(\.name).joined(separator: "+"))")
+                    lines.append("\(Int(t.timeIntervalSince(t0) / 60)) \(c.name): \(p.a.map(\.name).joined(separator: "+")) v \(p.b.map(\.name).joined(separator: "+"))" + (p.note.map { " [\($0)]" } ?? ""))
                     s.fill(c.id, at: t)
                     let d = draws.map { $0[k % $0.count] }
                     ends[ci] = t.addingTimeInterval((d?[0] ?? Double(10 + k % 5)) * 60)
@@ -1558,7 +2482,10 @@ enum Simulation {
                     k += 1
                 }
             }
-            guard let (ci, end) = ends.min(by: { ($0.value, $0.key) < ($1.value, $1.key) }) else { break }
+            guard let (ci, end) = ends.min(by: { ($0.value, $0.key) < ($1.value, $1.key) }) else {
+                if t < t0.addingTimeInterval(180*60), s.courts.contains(where: { s.eligible($0.format).count >= $0.format.needed }) { t=t.addingTimeInterval(30); continue }
+                break
+            }
             t = end; ends[ci] = nil
             SessionState.simulatedNow = t
             let m = s.courts[ci].match!
@@ -1612,23 +2539,11 @@ enum Simulation {
         // With -latecomers: four latecomers, one from each part of the ratings (2nd, 8th, 14th and 20th strongest).
         let ranked = real.players.sorted { $0.skill > $1.skill }
         let late = args.contains("-latecomers") ? Set([1, 7, 13, 19].filter { $0 < ranked.count }.map { ranked[$0].name }) : []
-        // Same players and rules, two ways to spend six court-hours.
-        // Partner requests from `-pairs "A,B;C,D"` (names stay out of the code), else close ratings, one level apart, two levels apart.
-        let given = args.firstIndex(of: "-pairs").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
-        // `-nopairs`: no requests; compares 2 courts with `-courts N` instead.
-        let noPairs = args.contains("-nopairs")
-        let courts = args.firstIndex(of: "-courts").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil } ?? 2
-        let requests = noPairs ? [] : given.map { $0.split(separator: ";").compactMap { p -> (String, String)? in
-            let n = p.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }; return n.count == 2 ? (n[0], n[1]) : nil } }
-            ?? [(11, 12), (5, 10), (2, 17)].filter { $0.1 < ranked.count }.map { (ranked[$0.0].name, ranked[$0.1].name) }
-        let configs: [(name: String, courts: Int, minutes: Double)] = noPairs ? [("2 courts", 2, 180), ("\(courts) courts", courts, 180)]
-            : [("No requests", courts, 180), ("With pair request\(requests.count == 1 ? "" : "s")", courts, 180)]
-        let results = configs.enumerated().map { i, c -> [Night] in
+        let courts = args.firstIndex(of: "-courts").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil } ?? 3
+        let configs: [(name: String, courts: Int, minutes: Double)] = [("2 courts", 2, 180), ("\(courts) courts", courts, 180)]
+        let results = configs.map { c -> [Night] in
             var start = real
             start.courts = (1...c.courts).map { Court(name: "Court \($0)", format: .doubles) }
-            for (x, y) in requests where i == 1 {
-                if let a = start.players.first(where: { $0.name == x }), let b = start.players.first(where: { $0.name == y }) { start.setPartner(a.id, b.id) }
-            }
             return (1...runs).map { run(start, minutes: c.minutes, length: length, late: late, arrival: arrival, seed: UInt64($0)) }
         }
         let (before, after) = (results[0], results[1])
@@ -1640,6 +2555,7 @@ enum Simulation {
         func team(_ side: Side) -> String { side.map { "\($0.name) \(f($0.skill))" }.joined(separator: " + ") }
         func pair(_ x: String, _ y: String, _ sep: String) -> String { [x, y].sorted().joined(separator: sep) }
         let names = real.players.map(\.name), skill = Dictionary(uniqueKeysWithValues: real.players.map { ($0.name, $0.skill) })
+        let fixedPartners = Set(real.lockedPairs.map { pair(real.player($0.0)!.name, real.player($0.1)!.name, " & ") })
 
         /// Per night: partner pairs and opponent pairs with counts, repeated partnerships, and rematches of the same four.
         func pairing(_ n: Night) -> (partners: [String: Int], opponents: [String: Int], repeatTeams: Int, rematches: Int) {
@@ -1690,26 +2606,33 @@ enum Simulation {
                 f(Double(games.map(\.straightBack.count).reduce(0, +)) / Double(runs)),
                 "avg \(f(mean(firsts))) min, longest \(f(firsts.max() ?? 0, 0)) min",
                 "\(f(mean(lateGames))) vs \(f(mean(onTimeGames)))",
+                "\(f(nights.flatMap { $0.unfinished.values }.max() ?? 0, 0)) min",
+                f(mean(nights.map { Double($0.neverPlayed.count) })),
+                f(mean(p.map { Double($0.partners.filter { !fixedPartners.contains($0.key) }.values.map { max(0, $0 - 1) }.reduce(0, +)) })),
             ]
         }
-        let rows = ["Games per night", "Games per player", "All four within 1 level", "All four within 1.5 levels", "Rating range on a court",
+        let rows = ["Games per night", "Average lowest–highest games per player", "All four within 1 level", "All four within 1.5 levels", "Rating range on a court",
                     "Rating range in mixed games", "Gap between the teams", "Widened to 1.5 for new partners",
                     "Widened so nobody goes straight back", "Mixed teams for new partners", "Mixed teams so nobody goes straight back",
-                    "Mixed teams, no similar group free", "Games with an overdue player", "Repeat partnerships per night",
+                    "Mixed teams, no similar group free", "Games with a 25+ minute wait note", "Repeat partnerships including locked teams",
                     "Same four again per night", "Most-played opponent pair (times a night)", "Different partner pairs per night",
                     "Wait between games", "Waits of 35+ min per night", "Waits of 45+ min per night", "Straight back on court (times a night)",
-                    "Latecomers' wait for their first game", "Games per latecomer vs on-time player"]
+                    "Latecomers' wait for their first game", "Games per latecomer vs on-time player", "Longest unfinished wait at closing", "Players never selected (per night)", "Repeat partnerships excluding locked teams"]
         let table = results.map(summary)
 
-        var out = "# Simulated nights: \(names.count) players, doubles, " + configs.map { "\($0.name) (\($0.courts) courts, \(Int($0.minutes / 60)) hours)" }.joined(separator: " vs ") + "\n\n"
+        var out = "# Simulated nights: \(names.count) players, doubles, " + configs.map { "\($0.courts) courts (\(Int($0.minutes / 60)) hours)" }.joined(separator: " vs ") + "\n\n"
         out += "Games last 10–14 min (evenly spread) · " + (late.isEmpty ? "everyone there from the start" : "\(late.sorted { (skill[$0] ?? 0) > (skill[$1] ?? 0) }.map { "\($0) \(f(skill[$0] ?? 0))" }.joined(separator: ", ")) arrive 60 minutes late")
         out += " · \(runs) nights each way, same random draws · winners drawn from ratings\n\n"
         out += "Rules as in the app: similar skill within 1 level, 1.5 for new partners, balanced teams from the nearest ratings; "
-        out += "nobody goes straight back on court while rested players can make a game; anyone overdue plays next.\n\n"
+        out += "balanced recalls may be at most one counted game ahead; general overdue priority and repeat-driven group selection are paused. Fresh nights clear old wait timestamps and arrival credits. Match quality uses ratings at match time; fixed starting strength is used only to draw winners. Game-count ranges average each night’s minimum and maximum.\n\n"
         out += "## Summary (average of \(runs) nights)\n\n| | " + configs.map(\.name).joined(separator: " | ") + " |\n|---|" + String(repeating: "---|", count: configs.count) + "\n"
-        for (i, r) in rows.enumerated() { out += "| \(r) | " + table.map { $0[i] }.joined(separator: " | ") + " |\n" }
+        for (i, r) in rows.enumerated() {
+            if late.isEmpty && r.lowercased().contains("latecomer") { continue }
+            out += "| \(r) | " + table.map { $0[i] }.joined(separator: " | ") + " |\n"
+        }
 
         // How the latecomers fared
+        if !late.isEmpty {
         for (c, nights) in shown.map({ (configs[$0], results[$0]) }) {
             out += "\n## Latecomers: \(c.name)\n\n| Player | Rating | First game after arriving | Longest first wait | Games | Straight onto a court |\n|---|---|---|---|---|---|\n"
             for name in late.sorted(by: { (skill[$0] ?? 0) > (skill[$1] ?? 0) }) {
@@ -1719,14 +2642,16 @@ enum Simulation {
             }
         }
 
+        }
+
         // Who waited longest, and why
         for (v, nights) in shown.map({ (configs[$0], results[$0]) }) {
             let long = nights.enumerated().flatMap { n, night in night.long.map { (night: n + 1, w: $0) } }
             out += "\n## Longest waits: \(v.name)\n\n"
             out += "\(long.count) waits of 35+ minutes across \(runs) nights (\(f(Double(long.count) / Double(runs))) a night).\n\n"
-            out += "| Player | Wait | Night | From–to | Games when the wait began | Everyone's average then |\n|---|---|---|---|---|---|\n"
+            out += "| Player | Wait | Night | From–to |\n|---|---|---|---|\n"
             for x in long.sorted(by: { $0.w.minutes > $1.w.minutes }).prefix(8) {
-                out += "| \(x.w.name) \(f(x.w.skill)) | \(f(x.w.minutes, 0)) min | \(x.night) | \(clock(x.w.from))–\(clock(x.w.to)) | \(x.w.games) | \(f(x.w.groupAverage)) |\n"
+                out += "| \(x.w.name) \(f(x.w.skill)) | \(f(x.w.minutes, 0)) min | \(x.night) | \(clock(x.w.from))–\(clock(x.w.to)) |\n"
             }
             let byPlayer = Dictionary(grouping: long, by: { $0.w.name }).mapValues(\.count).sorted { ($0.value, $1.key) > ($1.value, $0.key) }
             out += "\nMost often (35+ min waits over \(runs) nights): " + byPlayer.prefix(8).map { "\($0.key) \(f(skill[$0.key] ?? 0)) ×\($0.value)" }.joined(separator: ", ") + "\n"
@@ -1735,19 +2660,26 @@ enum Simulation {
         }
 
         let one = after[0]
-        out += "\n## Night 1 (\(configs[1].name)): every game\n\n| # | Start | Court | Team A | Team B | Avg | Gap | Winner | Length | Note |\n|---|---|---|---|---|---|---|---|---|---|\n"
-        for (i, g) in one.games.enumerated() {
-            let note = ([g.note].compactMap { $0 } + (g.straightBack.isEmpty ? [] : ["straight back: " + g.straightBack.joined(separator: ", ")])).joined(separator: "; ")
-            out += "| \(i + 1) | \(clock(g.minute)) | \(g.court) | \(team(g.a)) | \(team(g.b)) | \(f(avg(g.a), 2)) v \(f(avg(g.b), 2)) | \(f(g.gap, 2)) | \(g.aWon ? "A" : "B") | \(f(g.length, 0)) min | \(note) |\n"
+        out += "\n## Night 1 (\(configs[1].name)): matches by court\n\nTeam averages below are the ratings used when the game started. **Bold teams won.**\n"
+        for court in Set(one.games.map(\.court)).sorted() {
+            out += "\n### \(court)\n\n| Start | Team A · average | Team B · average | Gap |\n|---|---|---|---|\n"
+            for g in one.games where g.court == court {
+                let a = g.a.map(\.name).joined(separator: " & ") + " · " + f(avg(g.a), 2)
+                let b = g.b.map(\.name).joined(separator: " & ") + " · " + f(avg(g.b), 2)
+                out += "| \(clock(g.minute)) | \(g.aWon ? "**" + a + "**" : a) | \(g.aWon ? b : "**" + b + "**") | \(f(g.gap, 2)) |\n"
+            }
         }
-
-        out += "\n## Night 1 (\(configs[1].name)): each player\n\n| Player | Rating | Games | Won | Partners | Opponents | Longest wait | Straight back |\n|---|---|---|---|---|---|---|---|\n"
+        let explained = one.games.filter { $0.note != nil || !$0.straightBack.isEmpty }
+        out += "\n### Queue decisions\n\n"
+        for g in explained {
+            let note = ([g.note].compactMap { $0 } + (g.straightBack.isEmpty ? [] : ["immediate return: " + g.straightBack.joined(separator: ", ")])).joined(separator: "; ")
+            out += "- \(clock(g.minute)) · \(g.court): \(note)\n"
+        }
+        out += "\n## Night 1 (\(configs[1].name)): each player\n\n| Player · starting rating | Games | Won | Longest wait |\n|---|---|---|---|\n"
         for name in names.sorted(by: { (skill[$0] ?? 0, $1) > (skill[$1] ?? 0, $0) }) {
             let mine = one.games.filter { ($0.a + $0.b).contains { $0.name == name } }
             let won = mine.filter { g in (g.aWon ? g.a : g.b).contains { $0.name == name } }.count
-            let partners = Set(mine.flatMap { g in (g.a.contains { $0.name == name } ? g.a : g.b).map(\.name) }).subtracting([name])
-            let opponents = Set(mine.flatMap { g in (g.a.contains { $0.name == name } ? g.b : g.a).map(\.name) })
-            out += "| \(name) | \(f(skill[name] ?? 0)) | \(mine.count) | \(won) | \(partners.count) | \(opponents.count) | \(f(one.waits[name]?.max() ?? 0, 0)) min | \(mine.filter { $0.straightBack.contains(name) }.count) |\n"
+            out += "| \(name) · \(f(skill[name] ?? 0)) | \(mine.count) | \(won) | \(f(max(one.waits[name]?.max() ?? 0, one.unfinished[name] ?? 0), 0)) min |\n"
         }
 
         func totals(_ nights: [Night], _ key: KeyPath<(partners: [String: Int], opponents: [String: Int], repeatTeams: Int, rematches: Int), [String: Int]>) -> [String: Int] {
@@ -1763,24 +2695,392 @@ enum Simulation {
         let everyPair = names.count * (names.count - 1) / 2
         out += "\nOver \(runs) nights, \(pb.count) (\(configs[0].name)) and \(pa.count) (\(configs[1].name)) of the \(everyPair) possible partner pairs played together at least once.\n"
 
-        // How often each requested pair partnered, and their pattern on night 1 (T = together, a = apart).
-        if !requests.isEmpty { out += "\n## Partner requests (\(configs[1].name), \(runs) nights)\n\n| Pair | Ratings | Games per night (each) | Together per night | Fewest–most together | Share together | Against each other | Without request | Night 1 |\n|---|---|---|---|---|---|---|---|---|\n"
-        for (x, y) in requests {
-            func together(_ n: Night) -> (gx: Double, gy: Double, with: Double, against: Double, pattern: String) {
-                let mine = n.games.filter { ($0.a + $0.b).contains { $0.name == x } }
-                let flags = mine.map { g in [g.a, g.b].contains { side in side.contains { $0.name == x } && side.contains { $0.name == y } } }
-                let theirs = n.games.filter { ($0.a + $0.b).contains { $0.name == y } }.count
-                let against = mine.filter { g in (g.a + g.b).contains { $0.name == y } }.count - flags.filter { $0 }.count
-                return (Double(mine.count), Double(theirs), Double(flags.filter { $0 }.count), Double(against), flags.map { $0 ? "T" : "a" }.joined())
-            }
-            let w = after.map(together), wo = before.map(together)
-            let share = mean(w.map(\.with)) / max(1, mean(w.map { ($0.gx + $0.gy) / 2 }))
-            out += "| \(x) & \(y) | \(f(skill[x] ?? 0)) & \(f(skill[y] ?? 0)) | \(f(mean(w.map(\.gx)))) & \(f(mean(w.map(\.gy)))) | \(f(mean(w.map(\.with)))) | \(Int(w.map(\.with).min() ?? 0))–\(Int(w.map(\.with).max() ?? 0)) | \(Int((share * 100).rounded()))% | \(f(mean(w.map(\.against)))) | \(f(mean(wo.map(\.with)))) together, \(f(mean(wo.map(\.against)))) against | \(x): \(w[0].pattern) |\n"
-        }
-        }
-
         try? out.write(to: dir.appending(path: "sim-report.md"), atomically: true, encoding: .utf8)
         print(out)
     }
 }
+#endif
+
+struct ScheduledMatch: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var format: Format
+    var teamA: [UUID]
+    var teamB: [UUID]
+    var heldAt: Date?
+    var retryAt: Date?
+    var activatedAt: Date?
+    var returning: [UUID]?
+    var readyJumpers: [UUID]?
+    var idleReleased: Bool?
+    var assignedCourt: UUID?
+    var postponedUntil: Date?
+}
+
+extension SessionState {
+    static let scheduledDefault: TimeInterval = 12 * 60
+    func scheduledDuration(_ format: Format) -> TimeInterval {
+        let lens = games.filter { $0.teamA.count == format.needed / 2 && $0.length > 0 }.suffix(10).map(\.length).sorted()
+        guard !lens.isEmpty else { return Self.scheduledDefault }
+        let m = lens.count / 2
+        return lens.count % 2 == 1 ? lens[m] : (lens[m-1] + lens[m]) / 2
+    }
+    mutating func normalizeEnd() { if ended != nil, let last = games.map(\.end).max() { ended = last } }
+    var endedLabel: String {
+        guard let ended else { return "" }
+        return ended.formatted(date: Calendar.current.isDate(ended, inSameDayAs: date) ? .omitted : .abbreviated, time: .shortened)
+    }
+    @discardableResult mutating func scheduleMatch(_ format: Format, a: [UUID], b: [UUID]) -> Bool {
+        let ids = a + b
+        guard isLive, tournament == nil, hours?.isFinite == true, (hours ?? 0) > 0, a.count == format.needed/2, b.count == a.count,
+              Set(ids).count == format.needed, ids.allSatisfy({ id in players.contains { $0.id == id } }) else { return false }
+        if scheduled == nil { scheduled = [] }
+        scheduled?.append(ScheduledMatch(format: format, teamA: a, teamB: b))
+        refreshSchedule(); return true
+    }
+    func scheduledDone(_ r: ScheduledMatch) -> Bool { games.contains { $0.scheduled == r.id } }
+    func scheduledPlaying(_ r: ScheduledMatch) -> Bool { courts.contains { $0.match?.scheduled == r.id } }
+    func scheduleBlock(_ r: ScheduledMatch) -> String? {
+        if !isLive { return "Session ended" }
+        if tournament != nil { return "Waiting for queue mode" }
+        if let until = r.postponedUntil, until > Self.now { return "Postponed · \(Int(ceil(until.timeIntervalSince(Self.now)/60))) min" }
+        let ids = r.teamA + r.teamB
+        if ids.contains(where: { played($0) == 0 }) { return "Waiting for participants’ first game" }
+        guard let end = endsAt, Self.now.addingTimeInterval(scheduledDuration(r.format)) <= end else { return "Insufficient time" }
+        if ids.contains(where: { id in !players.contains { $0.id == id && $0.away != true && !$0.paused } }) { return "Waiting for players" }
+        if ids.contains(where: scheduledNeedsOrdinary) { return "Waiting for an ordinary game" }
+        if r.id != scheduledActive && ids.allSatisfy({ onCourt.contains($0) }) { return "Waiting for players" }
+        let pinned = courts.flatMap { c in c.manual?.compactMap { $0 } ?? validPlan(c).map { $0.teamA + $0.teamB } ?? [] }
+        if ids.contains(where: { pinned.contains($0) }) { return "Waiting for manual lineup" }
+        if !courts.contains(where: { $0.format == r.format && $0.manual == nil && validPlan($0) == nil }) { return "Waiting for court" }
+        return nil
+    }
+    mutating func refreshSchedule() {
+        guard scheduled != nil else { scheduledActive = nil; return }
+        for i in scheduled!.indices {
+            scheduled![i].heldAt = nil; scheduled![i].retryAt = nil
+            let r=scheduled![i],c=courts.first { $0.id == r.assignedCourt }
+            if scheduledDone(r) || scheduledPlaying(r) || scheduleBlock(r) != nil || (r.teamA+r.teamB).contains(where: { onCourt.contains($0) }) || c == nil || c!.match != nil || c!.format != r.format || c!.manual != nil || validPlan(c!) != nil { scheduled![i].assignedCourt = nil }
+        }
+        let chosen = scheduledReservation
+        if scheduledActive != chosen?.id {
+            scheduledActive = chosen?.id
+            if let id = chosen?.id, let i = scheduled!.firstIndex(where: { $0.id == id }) {
+                scheduled![i].activatedAt = Self.now; scheduled![i].returning = []; scheduled![i].idleReleased = false; scheduled![i].readyJumpers = nil
+            }
+        }
+        guard let id = chosen?.id, let i = scheduled!.firstIndex(where: { $0.id == id }) else { return }
+        for j in scheduled!.indices where j != i { scheduled![j].assignedCourt = nil }
+        let r = scheduled![i], ids = r.teamA + r.teamB, busy = ids.filter { onCourt.contains($0) }
+        var returning = r.returning ?? []
+        for id in busy where !returning.contains(id) { returning.append(id) }
+        scheduled![i].returning = returning
+        if !busy.isEmpty { scheduled![i].readyJumpers = nil; scheduled![i].assignedCourt = nil; return }
+        if r.readyJumpers == nil {
+            let returned = returning.compactMap { id -> (UUID, Date)? in
+                guard let end = games.last(where: { ($0.teamA + $0.teamB).contains(id) })?.end, let active = r.activatedAt, end >= active else { return nil }
+                return (id, end)
+            }
+            let last = returned.map { $0.1 }.max()
+            scheduled![i].readyJumpers = returned.filter { $0.1 == last }.map { $0.0 }
+        }
+        if scheduled![i].assignedCourt == nil { scheduled![i].assignedCourt = courts.first { $0.match == nil && $0.format == r.format && $0.manual == nil && validPlan($0) == nil }?.id }
+    }
+    var scheduledReservation: ScheduledMatch? {
+        let eligible: (ScheduledMatch) -> Bool = { !scheduledDone($0) && !scheduledPlaying($0) && scheduleBlock($0) == nil }
+        return (scheduled ?? []).first { $0.id == scheduledActive && eligible($0) } ?? (scheduled ?? []).first(where: eligible)
+    }
+    func scheduledStatus(_ r: ScheduledMatch) -> String {
+        if scheduledDone(r) { return "Completed" }
+        if scheduledPlaying(r) { return "Playing" }
+        if let blocked = scheduleBlock(r) { return blocked }
+        if (r.teamA + r.teamB).contains(where: { onCourt.contains($0) }) { return "Waiting for players" }
+        return scheduledReservation?.id == r.id && r.assignedCourt.flatMap(scheduledOnCourt) != nil ? "Scheduled · Locked" : "Waiting for court"
+    }
+    func scheduledOnCourt(_ id: UUID) -> ScheduledMatch? {
+        (scheduled ?? []).first { $0.assignedCourt == id && !scheduledDone($0) && !scheduledPlaying($0) && scheduleBlock($0) == nil && !($0.teamA+$0.teamB).contains(where: { onCourt.contains($0) }) }
+    }
+    var scheduledLockedPlayers: Set<UUID> {
+        Set((scheduled ?? []).filter { $0.assignedCourt.flatMap(scheduledOnCourt) != nil }.flatMap { $0.teamA+$0.teamB })
+    }
+    mutating func postponeScheduled(_ id: UUID) {
+        guard let i=scheduled?.firstIndex(where: { $0.id == id }), !scheduledDone(scheduled![i]), !scheduledPlaying(scheduled![i]) else { return }
+        scheduled![i].postponedUntil = Self.now.addingTimeInterval(10*60); scheduled![i].assignedCourt = nil
+        if scheduledActive == id { scheduledActive = nil }; refreshSchedule()
+    }
+    mutating func cancelScheduled(_ id: UUID) {
+        guard !courts.contains(where: { $0.match?.scheduled == id }) else { return }
+        scheduled?.removeAll { $0.id == id }; refreshSchedule()
+    }
+}
+
+#if DEBUG
+extension SessionState {
+    static func scheduledSelfCheck() {
+        let oldClock = simulatedNow
+        let t0 = Date(timeIntervalSinceReferenceDate: 100000)
+        simulatedNow = t0
+        defer { simulatedNow = oldClock }
+        func fixture() -> SessionState {
+            var x = SessionState(players: (0..<8).map { Player(name: "P\($0)") }, courts: [Court(name: "C1", format: .doubles), Court(name: "C2", format: .doubles)])
+            x.hours = 3
+            return x
+        }
+        func round(_ x: inout SessionState) {
+            for i in stride(from: 0, to: 8, by: 4) {
+                x.results.append(GameResult(teamA: Array(x.players[i..<(i+2)]).map(\.id), teamB: Array(x.players[(i+2)..<(i+4)]).map(\.id), winner: 0, court: "C1", start: t0.addingTimeInterval(-3600), end: t0.addingTimeInterval(-2880)))
+            }
+            x.refreshSchedule()
+        }
+        var x = fixture()
+        let a = Array(x.players.prefix(2)).map(\.id), b = Array(x.players[2..<4]).map(\.id)
+        assert(!x.scheduleMatch(.doubles, a: [a[0],a[0]], b: b), "scheduled players are distinct")
+        assert(x.scheduleMatch(.doubles, a: a, b: b))
+        assert(x.hours == 3, "scheduling uses the existing session length without changing it")
+        assert(x.scheduledReservation == nil, "first round must complete")
+        round(&x)
+        let request = x.scheduled![0]
+        assert(x.scheduledReservation?.id == request.id)
+        let g = x.queueUpNext.first { $0.scheduled == request.id }!
+        assert(g.a.map(\.id) == a && g.b.map(\.id) == b, "scheduled teams stay exact")
+        let others = x.queueUpNext.filter { $0.scheduled == nil }.flatMap { $0.a + $0.b }.map(\.id)
+        assert(Set(others).isDisjoint(with: Set(a+b)), "reserved players cannot be double booked")
+        x.players.append(Player(name: "Late")); x.refreshSchedule()
+        assert(x.scheduledReservation != nil, "late arrival does not close first-round milestone")
+        x.scheduled![0].heldAt = t0; x.scheduled![0].retryAt = t0.addingTimeInterval(5000)
+        simulatedNow = t0.addingTimeInterval(1440); x.refreshSchedule()
+        assert(x.scheduledReservation != nil && x.scheduled![0].retryAt == nil, "holds do not expire and legacy retries are ignored")
+        x.players[0].paused = true; x.refreshSchedule(); assert(x.scheduledReservation == nil)
+        x.players[0].paused = false; x.refreshSchedule()
+        var ready = x.queueUpNext.first { $0.scheduled != nil }!
+        var ci = x.courts.firstIndex { $0.id == ready.court! }!
+        x.courts[ci].manual = Array(x.players[4..<8]).map { Optional($0.id) }
+        x.fill(ready.court!, shown: ready, at: now)
+        assert(x.courts[ci].match == nil, "stale Start cannot replace a manual lineup")
+        x.courts[ci].manual = nil; x.courts[ci].plan = nil; x.refreshSchedule()
+        ready = x.queueUpNext.first { $0.scheduled != nil }!; ci = x.courts.firstIndex { $0.id == ready.court! }!
+        x.fill(ready.court!, at: now); assert(x.courts[ci].match?.scheduled == request.id)
+        x.undoStart(ready.court!); x.refreshSchedule(); assert(x.scheduledReservation != nil)
+        ready = x.queueUpNext.first { $0.scheduled != nil }!
+        x.fill(ready.court!, at: now); x.finish(ready.court!, winner: nil, at: now)
+        assert(!x.scheduledDone(request), "cancelled game does not fulfill request")
+        ready = x.queueUpNext.first { $0.scheduled != nil }!
+        x.fill(ready.court!, at: now); x.finish(ready.court!, winner: 0, at: now)
+        assert(x.scheduledDone(request) && !x.queueUpNext.contains { $0.scheduled == request.id })
+        x.results[x.results.count - 1].jumpers = a
+        assert(x.scheduledPenalties[a[0]] == 2, "direct scheduled return gives two priority games")
+        x.results.append(GameResult(teamA: [a[0]], teamB: [b[0]], winner: 0, court: "C1", start: now))
+        assert(x.scheduledPenalties[a[0]] == 1)
+        x.results.append(GameResult(teamA: [a[0]], teamB: [b[0]], winner: 0, court: "C1", start: now))
+        assert(x.scheduledPenalties[a[0]] == 0)
+        x.deleteResult(at: x.results.count - 1); assert(x.scheduledPenalties[a[0]] == 1)
+        var returns = SessionState(players: (0..<12).map { Player(name: "R\($0)") }, courts: [Court(name: "C1", format: .doubles), Court(name: "C2", format: .doubles)])
+        returns.hours = 3
+        let returnIDs = returns.players.map(\.id)
+        for k in stride(from: 0, to: 12, by: 4) { returns.results.append(GameResult(teamA: Array(returnIDs[k..<(k+2)]), teamB: Array(returnIDs[(k+2)..<(k+4)]), winner: 0, court: "C1", start: t0.addingTimeInterval(-720), end: t0)) }
+        returns.courts[0].match = Match(teamA: [returnIDs[0],returnIDs[4]], teamB: [returnIDs[5],returnIDs[6]], start: now)
+        returns.courts[1].match = Match(teamA: [returnIDs[1],returnIDs[7]], teamB: [returnIDs[8],returnIDs[9]], start: now)
+        assert(returns.scheduleMatch(.doubles, a: Array(returnIDs[0..<2]), b: Array(returnIDs[2..<4])))
+        simulatedNow = now.addingTimeInterval(600); returns.finish(returns.courts[0].id, winner: 0, at: now)
+        simulatedNow = now.addingTimeInterval(600); returns.finish(returns.courts[1].id, winner: 0, at: now)
+        assert(returns.scheduledJumpers(Array(returnIDs[0..<4])) == [returnIDs[1]], "only the last direct return is penalized, not someone resting ten minutes")
+        let direct = returns.queueUpNext.first { $0.scheduled != nil }!
+        returns.fill(direct.court!, shown: direct, at: now); returns.finish(direct.court!, winner: 0, at: now)
+        assert(returns.scheduleMatch(.doubles, a: Array(returnIDs[0..<2]), b: Array(returnIDs[2..<4])))
+        assert(returns.scheduleBlock(returns.scheduled!.last!) == "Waiting for an ordinary game")
+        returns.results.append(GameResult(teamA: [returnIDs[1]], teamB: [returnIDs[4]], winner: 0, court: "C1", start: now)); returns.refreshSchedule()
+        assert(returns.scheduledReservation != nil, "one ordinary game opens the next scheduled request")
+        simulatedNow = t0.addingTimeInterval(1440)
+        var stable = fixture(); round(&stable)
+        let stableIDs = stable.players.map(\.id)
+        stable.players[0].away = true
+        assert(stable.scheduleMatch(.doubles, a: Array(stableIDs[0..<2]), b: Array(stableIDs[2..<4])))
+        assert(stable.scheduleMatch(.doubles, a: Array(stableIDs[4..<6]), b: Array(stableIDs[6..<8])))
+        let held = stable.scheduledReservation!.id
+        stable.players[0].away = false; stable.refreshSchedule()
+        assert(stable.scheduledReservation?.id == held, "returning older requests cannot preempt an active hold")
+        stable.cancelScheduled(held)
+        stable.courts[0].match = Match(teamA: [stableIDs[0],stableIDs[4]], teamB: [stableIDs[5],stableIDs[6]], start: now)
+        stable.refreshSchedule()
+        let idle = stable.queueUpNext.first { $0.court == stable.courts[1].id }!
+        assert(idle.scheduled == nil && idle.note?.contains("hold relaxed") == true)
+        stable.fill(idle.court!, shown: idle, at: now)
+        assert(stable.courts[1].match != nil && stable.onCourt.count == 8, "held players can fill an idle court without duplicate booking")
+        simulatedNow = now.addingTimeInterval(60); stable.finish(stable.courts[0].id, winner: 0, at: now)
+        assert(!stable.queueUpNext.contains { $0.court == stable.courts[0].id }, "a second idle release cannot starve the scheduled request")
+        simulatedNow = now.addingTimeInterval(60); stable.finish(stable.courts[1].id, winner: 0, at: now)
+        assert(stable.queueUpNext.contains { $0.scheduled != nil })
+        simulatedNow = t0.addingTimeInterval(1440)
+
+        var participantOnly = fixture()
+        participantOnly.results = [GameResult(teamA: a, teamB: b, winner: 0, court: "C1", start: now.addingTimeInterval(-720), end: now)]
+        // Use this fixture's IDs, leaving its other four players unplayed.
+        participantOnly.players = x.players
+        participantOnly.scheduled = [ScheduledMatch(format: .doubles, teamA: a, teamB: b)]
+        assert(participantOnly.scheduledReservation != nil, "only requested participants need a completed game")
+        x = fixture(); round(&x)
+        let firstA = Array(x.players[0..<2]).map(\.id), firstB = Array(x.players[2..<4]).map(\.id)
+        let laterA = Array(x.players[4..<6]).map(\.id), laterB = Array(x.players[6..<8]).map(\.id)
+        x.courts[0].match = Match(teamA: firstA, teamB: firstB, start: now)
+        assert(x.scheduleMatch(.doubles, a: firstA, b: firstB)); assert(x.scheduleMatch(.doubles, a: laterA, b: laterB))
+        assert(x.scheduledReservation?.id == x.scheduled![1].id, "all-busy request cannot block a ready later request")
+        x.courts[0].match = nil; x.scheduled = nil
+        assert(x.scheduleMatch(.doubles, a: firstA, b: firstB)); assert(x.scheduleMatch(.doubles, a: laterA, b: laterB))
+        let g1 = x.queueUpNext.first { $0.scheduled == x.scheduled![0].id }!
+        x.fill(g1.court!, shown: g1, at: now)
+        let g2 = x.queueUpNext.first { $0.scheduled == x.scheduled![1].id }!
+        x.fill(g2.court!, shown: g2, at: now)
+        assert(x.courts.filter { $0.match?.scheduled != nil }.count == 2, "each Start advances reservations before the next preview")
+        x = fixture(); round(&x)
+        assert(x.scheduleMatch(.doubles, a: Array(x.players[0..<2]).map(\.id), b: Array(x.players[2..<4]).map(\.id)))
+        let preview = x.queueUpNext.first { $0.scheduled != nil }!
+        simulatedNow = x.endsAt!
+        x.fill(preview.court!, shown: preview, at: now)
+        assert(x.onCourt.isEmpty && x.scheduledStatus(x.scheduled![0]) == "Insufficient time")
+        simulatedNow = t0; x = fixture(); round(&x)
+        let last = x.games.map(\.end).max()!
+        x.fill(x.courts[0].id, at: now)
+        x.end(at: t0.addingTimeInterval(86400))
+        assert(x.ended == last, "ending tomorrow ignores cancellation timestamp")
+        let data = try! JSONEncoder().encode(Store(sessions: [x]))
+        let decoded = try! JSONDecoder().decode(Store.self, from: data)
+        assert(decoded.sessions[0].ended == last)
+        x = fixture(); x.end(at: t0); assert(x.ended == t0, "empty session retains tap time")
+        x = fixture(); assert(x.scheduledDuration(.doubles) == 720)
+    }
+}
+extension SessionState {
+    static func queueSimplifiedSelfCheck() {
+        let old=simulatedNow; simulatedNow=Date(timeIntervalSinceReferenceDate:1000000);defer { simulatedNow=old }
+        func fixture(_ skills:[Double]=Array(repeating:3,count:8)) -> SessionState {
+            var x=SessionState(players:skills.enumerated().map { Player(name:"Q\($0.offset)",skill:$0.element,readyAt:now.addingTimeInterval(Double($0.offset))) },courts:[Court(name:"C1",format:.doubles),Court(name:"C2",format:.doubles)]);x.hours=3;return x
+        }
+        func complete(_ x:inout SessionState){for k in stride(from:0,to:x.players.count,by:4){x.results.append(GameResult(teamA:Array(x.players[k..<(k+2)]).map(\.id),teamB:Array(x.players[(k+2)..<(k+4)]).map(\.id),winner:0,court:"C1",start:now.addingTimeInterval(-600),end:now.addingTimeInterval(-60)))};x.refreshSchedule()}
+        var x=fixture(Array(repeating:3,count:4));let first=x.pick(.doubles,from:x.queue)!
+        x.results.append(GameResult(teamA:first.a.map(\.id),teamB:first.b.map(\.id),winner:0,court:"C1",start:now.addingTimeInterval(-600),end:now.addingTimeInterval(-60)))
+        let second=x.pick(.doubles,from:x.queue)!
+        assert(Set(first.a.map(\.id)) != Set(second.a.map(\.id)) && Set(first.a.map(\.id)) != Set(second.b.map(\.id)),"repeated foursomes rotate balanced partnerships")
+        for count in 4...8 {
+            x=fixture(Array(repeating:3,count:count));x.courts.removeLast()
+            let court=x.courts[0].id
+            for game in 0..<24 {
+                guard let shown=x.nextPairing(for:x.courts[0]) else { assertionFailure("small roster must keep playing");return }
+                if count == 4 && game == 3 { assert(shown.rematchFallback,"four-player cooldown cannot be cleared without a fallback") }
+                x.fill(court,shown:shown,at:now)
+                assert(x.courts[0].match.map { Set($0.teamA+$0.teamB) } == Set((shown.a+shown.b).map(\.id)),"Start accepts the fallback preview")
+                simulatedNow=now.addingTimeInterval(12*60);x.finish(court,winner:game%2,at:now)
+            }
+            let counts=x.players.map { x.played($0.id) }
+            assert(counts.min()! > 0 && counts.max()!-counts.min()! <= 1,"small-roster games remain even")
+        }
+        x=fixture(Array(repeating:3,count:4));x.courts.removeLast()
+        let fallbackCourt=x.courts[0].id
+        for game in 0..<3 {x.fill(fallbackCourt,at:now);simulatedNow=now.addingTimeInterval(12*60);x.finish(fallbackCourt,winner:game%2,at:now)}
+        x.shuffle(fallbackCourt);x.fill(fallbackCourt,shown:x.nextPairing(for:x.courts[0]),at:now)
+        assert(x.courts[0].match != nil,"shuffled fallback can start")
+        x.finish(fallbackCourt,winner:nil,at:now)
+        let fallback=x.nextPairing(for:x.courts[0])!
+        x.addPlayer("Extra",skill:3)
+        assert(!x.automaticMatchupAllowed(fallback.a.map(\.id),fallback.b.map(\.id)),"normal alternatives reject a stale rematch fallback")
+        x=fixture(Array(repeating:3,count:5));x.courts.removeLast();x.players[4].away=true
+        let earlyID=x.players[4].id,earlyCourt=x.courts[0].id
+        for game in 0..<2 {x.fill(earlyCourt,at:now);simulatedNow=now.addingTimeInterval(12*60);x.finish(earlyCourt,winner:game%2,at:now)}
+        x.arrive(earlyID);assert(x.players[4].credit == nil)
+        let earlyGame=x.nextPairing(for:x.courts[0])
+        assert(earlyGame.map { ($0.a+$0.b).contains { $0.id == earlyID } } == true,"recall two-game returners for an early fifth arrival")
+        x.fill(earlyCourt,shown:earlyGame,at:now);assert(x.courts[0].match != nil)
+        func arrivalWave(_ minute: Double = 60) -> SessionState {
+            var s=fixture(Array(repeating:3,count:12));let start=now,ids=s.players.map(\.id)
+            for r in 0..<3 {for i in stride(from:0,to:12,by:4) where r != 2 || i != 0 {
+                s.results.append(GameResult(teamA:[ids[i],ids[i+1]],teamB:[ids[i+2],ids[i+3]],winner:r%2,court:"C1",start:start.addingTimeInterval(Double(r)*60),end:start.addingTimeInterval(Double(r+1)*60)))
+            }}
+            simulatedNow=start.addingTimeInterval(minute*60)
+            s.courts[0].match=Match(teamA:Array(ids[0..<2]),teamB:Array(ids[2..<4]),start:now)
+            for i in 0..<12 {s.addPlayer("Late\(i)",skill:3)}
+            return s
+        }
+        x=arrivalWave();x.players[12].credit=nil;assert(x.isNewcomer(x.players[12]),"arrival status is independent of credit")
+        for choice in 0..<4 {
+            let mixed=x.pick(.doubles,from:x.eligible(.doubles),choice:choice)!
+            assert((mixed.a+mixed.b).filter(x.isNewcomer).count <= latePerGame && x.isEven(mixed.a.map(\.id),mixed.b.map(\.id)),"find balanced regulars beyond the first twelve before waiving the newcomer cap")
+        }
+        let mixedCourt=x.courts[1].id;x.fill(mixedCourt,shown:x.nextPairing(for:x.courts[1]),at:now)
+        assert(x.courts[1].match != nil,"mixed arrival preview starts");x.undoStart(mixedCourt)
+        for i in 5..<12 {x.players[i].paused=true}
+        let scarce=x.pick(.doubles,from:x.eligible(.doubles))!
+        assert((scarce.a+scarce.b).filter(x.isNewcomer).count > latePerGame,"one available regular cannot satisfy the newcomer cap")
+        x=arrivalWave(29.99);assert(x.players.dropFirst(12).allSatisfy { !x.isNewcomer($0) && $0.credit == nil },"keep the thirty-minute grace period")
+        x.players[12].since=x.started!.addingTimeInterval(lateAfter)
+        assert(x.isNewcomer(x.players[12]),"the grace period ends exactly at thirty minutes")
+        x=fixture([3,3.2,3.4,3.6,1.8,4.2]);let skillIDs=x.players.map(\.id)
+        let near=Self.pickDoubles(x.players)!
+        assert(Set((near.a+near.b).map(\.id)) == Set(skillIDs.prefix(4)),"similar stage precedes widening")
+        let rested=Self.pickDoubles(x.players,justOff:Set(skillIDs[2...3]))!
+        assert(Set((rested.a+rested.b).map(\.id)) == Set([skillIDs[0],skillIDs[1],skillIDs[4],skillIDs[5]]),"balanced rested group precedes narrower recalled group")
+        let line=fixture([5,1,1,1,3,3]).players,off=Set(line.suffix(2).map(\.id))
+        let recalled=pickDoubles(line,justOff:off)!
+        assert(abs(recalled.a.map(\.skill).reduce(0,+)-recalled.b.map(\.skill).reduce(0,+))/2 <= fairGap && !(Set((recalled.a+recalled.b).map(\.id)).isDisjoint(with:off)))
+        let capped=pickDoubles(line,justOff:off,games:Dictionary(uniqueKeysWithValues:line.suffix(2).map { ($0.id,2) }))!
+        assert(Set((capped.a+capped.b).map(\.id)).isDisjoint(with:off),"recalls cannot be two counted games ahead")
+        for (rating,allowed) in [(3.0,true),(4.75,true),(2.99,false),(4.76,false)] {x=fixture([3.5,3.5,rating,rating]);x.setLock(x.players[0].id,x.players[1].id);assert((x.pick(.doubles,from:x.queue) != nil) == allowed,"matching-rating locked band boundaries")}
+        for (opponent,allowed) in [(3.0,false),(5.0,true)] {
+            x=fixture([3.5,3.5,opponent,opponent]);let ids=x.players.map(\.id);x.setLock(ids[0],ids[1])
+            assert((x.lockedGame(x.players,x.lockContext(x.players)[0],locks:x.lockContext(x.players)) != nil) == !allowed)
+            for _ in 0..<3 { for i in 0..<2 { x.results.append(GameResult(teamA:[ids[i]],teamB:[ids[i+2]],winner:0,court:"C1",start:now.addingTimeInterval(-600),end:now.addingTimeInterval(-60))) } }
+            assert(x.streakBoost(ids[0]) == 0.5 && x.streakBoost(ids[2]) == -0.5)
+            assert((x.lockedGame(x.players,x.lockContext(x.players)[0],locks:x.lockContext(x.players)) != nil) == allowed,"both locked sides use streak-adjusted eligibility")
+            assert(x.players.map(\.skill) == [3.5,3.5,opponent,opponent],"matching boosts do not change saved ratings")
+        }
+        x=fixture([5,5,2,2]);x.setLock(x.players[0].id,x.players[1].id)
+        x.results=[GameResult(teamA:[x.players[0].id,x.players[2].id],teamB:[x.players[1].id,x.players[3].id],winner:0,court:"C1",start:now.addingTimeInterval(-3600),end:now.addingTimeInterval(-1800))]
+        for i in x.players.indices {x.players[i].since=now.addingTimeInterval(-29*60)}
+        assert(x.pick(.doubles,from:x.queue,allowIdleRelease:true) == nil);simulatedNow=now.addingTimeInterval(60);assert(x.pick(.doubles,from:x.queue) != nil)
+        x=fixture();let rematchIDs=x.players.map(\.id)
+        x.setLock(rematchIDs[0],rematchIDs[1]);x.setLock(rematchIDs[2],rematchIDs[3])
+        func record(_ a:[Int],_ b:[Int],_ winner:Int?=0){x.results.append(GameResult(teamA:a.map { rematchIDs[$0] },teamB:b.map { rematchIDs[$0] },winner:winner,court:"C1",start:now.addingTimeInterval(-600),end:now.addingTimeInterval(-60)))}
+        func rematchAllowed()->Bool { Self.keepsLocks(Array(rematchIDs[0..<2]),Array(rematchIDs[2..<4]),x.lockContext(x.players),strict:true,real:Dictionary(uniqueKeysWithValues:x.players.map { ($0.id,x.matchSkill($0.id)) })) }
+        assert(rematchAllowed());record([0,1],[2,3]);assert(!rematchAllowed())
+        record([4,5],[6,7]);record([4,6],[5,7]);assert(!rematchAllowed(),"unrelated games do not clear rematch cooldown")
+        record([0,2],[1,3],1);record([0,3],[1,2],nil);assert(!rematchAllowed(),"one game and a cancellation do not clear cooldown")
+        record([0,1],[2,4],1);assert(!rematchAllowed(),"every participant needs two other games")
+        record([3],[5],1);assert(rematchAllowed(),"two completed games per participant clear cooldown")
+        x.results.removeLast();assert(!rematchAllowed(),"deleting a result restores rematch cooldown")
+        x=fixture();let teamIDs=x.players.map(\.id)
+        func teamGame(_ a:[Int],_ b:[Int],_ winner:Int?=0){x.results.append(GameResult(teamA:a.map { teamIDs[$0] },teamB:b.map { teamIDs[$0] },winner:winner,court:"C1",start:now.addingTimeInterval(-600),end:now.addingTimeInterval(-60)))}
+        func allowed()->Bool { x.automaticMatchupAllowed(Array(teamIDs[0..<2]),Array(teamIDs[2..<4])) }
+        teamGame([0,1],[2,3]);assert(!allowed())
+        teamGame([0,4],[2,5]);teamGame([1,6],[3,7]);assert(!allowed(),"separate games do not clear exact-team cooldown")
+        teamGame([0,1],[4,5]);assert(!allowed(),"both teams need a different opponent")
+        teamGame([2,3],[6,7],nil);assert(!allowed(),"cancelled games do not clear cooldown")
+        teamGame([3,2],[7,6]);assert(allowed())
+        x.results.removeLast();assert(!allowed(),"deleting the qualifying result restores cooldown")
+        x.results[0].winner=nil;assert(allowed(),"cancelling original encounter removes its restriction")
+        x=fixture();let preview=x.nextPairing(for:x.courts[0])!
+        x.results.append(GameResult(teamA:preview.a.map(\.id),teamB:preview.b.map(\.id),winner:0,court:"C1",start:now.addingTimeInterval(-600),end:now.addingTimeInterval(-60)))
+        x.courts[0].plan=Match(teamA:preview.a.map(\.id),teamB:preview.b.map(\.id));assert(x.validPlan(x.courts[0]) == nil)
+        x.fill(x.courts[0].id,shown:preview,at:now);assert(x.courts[0].match == nil,"stale automatic rematch is rejected at Start")
+        x.courts[0].manual=(preview.a+preview.b).map { Optional($0.id) };x.fill(x.courts[0].id,shown:preview,at:now);assert(x.courts[0].match != nil,"fully manual lineups retain override")
+        x=fixture([2.5,3.5,4,2]);let hotIDs=x.players.map(\.id)
+        for _ in 0..<3 { x.results.append(GameResult(teamA:[hotIDs[0]],teamB:[hotIDs[1]],winner:0,court:"C1",start:now.addingTimeInterval(-600),end:now.addingTimeInterval(-60))) }
+        let boosted=x.players.map { p -> Player in var q=p;q.skill=x.matchSkill(p.id);return q }
+        assert(x.hotColdGame(boosted,picked:boosted,overdue:[],justOff:[],maxSpread:2) != nil)
+        assert(x.hotColdGame(boosted,picked:boosted,overdue:[],justOff:[],maxSpread:1) == nil,"hot/cold cannot widen the selected skill stage")
+        x=fixture();complete(&x);let ids=x.players.map(\.id)
+        assert(x.scheduleMatch(.doubles,a:Array(ids[0..<2]),b:Array(ids[2..<4])))
+        let request=x.scheduled![0].id,court=x.scheduled![0].assignedCourt!
+        x.courts.reverse();x.refreshSchedule();assert(x.scheduled![0].assignedCourt == court)
+        x.shuffle(court);x.setManual(true,on:court);assert(x.courts.first { $0.id == court }!.manual == nil)
+        let other=x.courts.first { $0.id != court }!.id
+        x.shuffle(other);x.refreshSchedule();assert(x.scheduled![0].assignedCourt == court,"shuffling another court cannot unlock a scheduled assignment")
+        let ordinary=x.nextPairing(for:x.courts.first { $0.id == other }!)!
+        _=x.replace(ordinary.a[0].id,with:ids[0],on:other);assert(x.courts.first { $0.id == other }!.plan == nil)
+        x.setManual(true,on:other);x.setSlot(0,to:ids[0],on:other);assert(x.courts.first { $0.id == other }!.manual![0] == nil);x.setManual(false,on:other)
+        x.postponeScheduled(request);assert(x.scheduledReservation == nil && x.scheduledOnCourt(court) == nil)
+        assert(x.scheduleMatch(.doubles,a:Array(ids[4..<6]),b:Array(ids[6..<8])))
+        let active=x.scheduledReservation!.id;simulatedNow=now.addingTimeInterval(600);x.refreshSchedule();assert(x.scheduledReservation?.id == active)
+        x.cancelScheduled(active);assert(x.scheduledReservation?.id == request && x.scheduled![0].assignedCourt != nil)
+        x.players[0].paused=true;x.refreshSchedule();assert(x.scheduled![0].assignedCourt == nil)
+        x.players[0].paused=false;x.refreshSchedule();let restored=try! JSONDecoder().decode(SessionState.self,from:JSONEncoder().encode(x));assert(restored.scheduled![0].assignedCourt == x.scheduled![0].assignedCourt)
+    }
+}
+
 #endif

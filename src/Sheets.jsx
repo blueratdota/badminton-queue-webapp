@@ -7,7 +7,7 @@ import { cn } from 'cn';
 import {
   postponeScheduled, scheduleMatch, scheduledStatus, scheduledDone, scheduledPlaying, cancelScheduled, endLabel, getS, SKILL, PREFS, P, level, r1, avg, names, played, wins, score, isDupName, addPlayer, arrive, replacements, replace, courtById, clone,
   deleteResult, past, returningPlayers, registry, queue, setLock, splitDue, rankingMinimum, places,
-  tournamentEntrants, buildTournament, withMatching,
+  tournamentEntrants, buildTournament, withMatching, matchSkill,
 } from './engine';
 import { ui, save, closeModal, openModal, openEdit, confirm, switchTo, newSession, deleteSession } from './store';
 import { cap, plural, row, btnRow, Dots, Rating, Section, Seg } from './bits';
@@ -128,7 +128,7 @@ function ReplacePlayer({ m }) {
   const out = P(m.out), c = courtById(m.court);
   const all = withMatching(() => replacements(m.out, m.court));
   // Best fit: keeps the game even and is close to the replaced player's level. Everyone else, closest level first.
-  const gap = x => Math.abs(x.player.skill - (out?.skill ?? 3)), fits = x => x.even && gap(x) <= 1;
+  const gap = x => Math.abs(matchSkill(x.player.id,c?.format) - (out ? matchSkill(out.id,c?.format) : 3)), fits = x => x.even && gap(x) <= 1;
   const best = all.filter(fits), rest = all.filter(x => !fits(x)).sort((x, y) => gap(x) - gap(y));
   const doReplace = id => {
     const before = clone(getS());
@@ -401,7 +401,7 @@ function Pairing() {
   const pairs = S.players.filter(p => mutual(p) && p.id < p.lock).map(p => [p, P(p.lock)]);
   return (
     <Sheet title="Locked Teammates" left={null} right={{ label: 'Done', run: closeModal }}>
-      <Section foot="Locked teams face real-average opponents from 0.50 lower through 1.25 higher. Unmatchable pairs wait 30 minutes before playing separately, even if a court is idle. After three wins together, each plays once with a different teammate; they need not face each other.">
+      <Section foot="Locked teams face streak-adjusted opponents from 0.50 lower through 1.25 higher. Unmatchable pairs wait 30 minutes before playing separately, even if a court is idle. After three wins together, each plays once with a different teammate; they need not face each other. Before a rematch, both exact teams must complete a game against another team. When both teams are locked, each player also needs two other completed games.">
         {pairs.map(([x, y]) => (
           <div key={x.id} className={cn(row, 'flex items-center justify-between gap-3 py-1.5')}>
             <Who name={`${x.name} & ${y.name}`} sub={splitDue(x.id, y.id) ? 'Cooldown · different teammates' : 'Locked together'} />

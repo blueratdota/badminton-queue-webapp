@@ -27,9 +27,9 @@ try {
   now+=p.scheduledDuration('doubles')*2;p.refreshSchedule();assert(p.scheduledReservation(),'reservation does not expire');
   s.players[0].paused=true;p.refreshSchedule();assert.equal(p.scheduledReservation(),null);s.players[0].paused=false;p.refreshSchedule();assert(p.scheduledReservation());
   game=p.queueUpNext().find(x=>x.scheduled===id);
-  s.courts.find(c=>c.id===game.court).plan={a:['p4','p5'],b:['p6','p7']};
+  s.courts.find(c=>c.id===game.court).manual=['p4','p5','p6','p7'];
   p.fill(game.court,game);assert(!s.courts.find(c=>c.id===game.court).match,'stale scheduled preview cannot replace manual lineup');
-  s.courts.forEach(c=>c.plan=null); p.refreshSchedule();game=p.queueUpNext().find(x=>x.scheduled===id);
+  s.courts.forEach(c=>{c.plan=null;c.manual=null;}); p.refreshSchedule();game=p.queueUpNext().find(x=>x.scheduled===id);
   p.fill(game.court,game); assert.equal(s.courts.find(c=>c.id===game.court).match.scheduled,id);
   p.finish(game.court,null); assert(!p.scheduledDone(s.scheduled[0]));p.refreshSchedule();assert(p.scheduledReservation());
   game=p.queueUpNext().find(x=>x.scheduled===id);p.fill(game.court,game);p.finish(game.court,0);assert(p.scheduledDone(s.scheduled[0]));assert(!p.queueUpNext().some(x=>x.scheduled===id));

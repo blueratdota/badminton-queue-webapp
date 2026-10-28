@@ -252,7 +252,7 @@ struct TournamentSections: View {
             } header: {
                 Text("Round Robin · \(rr.filter { $0.winner != nil }.count) of \(rr.count) played")
             } footer: {
-                Text("Top \(t.advance) (green) go to the bracket. Ties go to the higher-rated side.")
+                Text("Top \(t.advance) (cyan) go to the bracket. Ties go to the higher-rated side.")
             }
 
             bracket(t, .upper, "Upper Bracket")

@@ -17,6 +17,7 @@ if (process.argv.includes('--parity')) { // one night with nothing random; same 
   const S = { id: 'p', date: t0, results: [], tournament: null,
     players: (src0.current || src0).players.map((p, n) => ({ id: 'p' + n, name: p.name, skill: p.skill, rated: p.rated, pref: p.pref || 'any', paused: false, readyAt: t0 + n })),
     courts: Array.from({ length: courts }, (_, i) => page.court('Court ' + (i + 1), 'doubles')) };
+  S.queueMatching=opt('queue-matching',(src0.current||src0).queueMatching||'auto');
   page.set('S', S);
   const byName = Object.fromEntries(S.players.map(p => [p.name, p.id])), truth = Object.fromEntries(S.players.map(p => [p.id, p.skill]));
   for (const [x, y] of pairs) page.setPartner(byName[x], byName[y]);
@@ -64,6 +65,7 @@ function night(seed, withPairs) {
   const S = { id: 'sim', date: t0, results: [], tournament: null,
     players: roster.map((p, n) => ({ id: 'p' + n, name: p.name, skill: p.skill, pref: 'any', paused: false, readyAt: t0 + n })),
     courts: Array.from({ length: courts }, (_, i) => page.court('Court ' + (i + 1), 'doubles')) };
+  S.queueMatching=opt('queue-matching',(src.current||src).queueMatching||'auto');
   page.set('S', S);
   const truth = Object.fromEntries(S.players.map(p => [p.id, p.skill])), byName = Object.fromEntries(S.players.map(p => [p.name, p.id]));
   if (withPairs) for (const [x, y] of pairs) page.setPartner(byName[x], byName[y]);

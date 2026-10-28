@@ -1,111 +1,532 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 extension Color {
-    static let court = Color(red: 0.18, green: 0.48, blue: 0.33)
+    static let court = Color(red: 0, green: 0.451, blue: 0.580)
+    static let playingCourt = Color(red: 0.50, green: 0.20, blue: 0.22)
     static let singles = Color.orange
     static let doubles = Color.court
 }
 
-struct ContentView: View {
-    @Binding var s: SessionState
-    @AppStorage("appearance") private var appearance = "system" // applied app-wide in ShuttleQueueApp
-    @Binding var past: [SessionState]
-    @State private var showSessions = false
-    @State private var showStandings = ProcessInfo.processInfo.arguments.contains("-standings") // test launches open it directly
+/// The main menu, where the app opens: create a session, the live sessions, past sessions, and everyone who's played.
+struct HomeView: View {
+    @Binding var sessions: [SessionState]
+    @State private var open: UUID?
+    @State private var creating = false
     @State private var showAllPlayers = false
-    @State private var showSessionPlayers = false
-    @State private var showPairing = false
-    @State private var showAddPlayer = false
-    @State private var removing: Player?
-    @State private var finishing: Court?
-    @State private var showTournamentSetup = false
-    @State private var showReturning = false
-    @State private var editing: Player?
-    @State private var replacing: ReplaceTarget?
-    @State private var confirmEndTournament = false
+    @State private var deleting: SessionState?
 
     var body: some View {
-        // The matching runs once per screen update; every court card, the Fill button and Up Next read from it.
-        let up = s.upNext
-        let next = s.openCourtPairings(up)
+        let live = sessions.filter(\.isLive).sorted { $0.date > $1.date }
+        let past = sessions.filter { !$0.isLive }.sorted { $0.date > $1.date }
         NavigationStack {
-            HStack(spacing: 0) {
-                courtsArea(next)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(.systemGroupedBackground))
-                Divider()
-                queuePanel(up).frame(width: 312)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 28) {
+                    Image("ClubLogo")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 180)
+                        .accessibilityLabel("Hampashers Badminton")
+                    // Two columns with each row's tiles the same height, however the text wraps.
+                    Grid(horizontalSpacing: 16, verticalSpacing: 16) {
+                        GridRow {
+                            tile("Create New Session", "Name, courts, length and players", icon: "plus", tint: .court, prominent: true) { creating = true }
+                            tile("All Players", "^[\(SessionState.registry(sessions).count) player](inflect: true) across all sessions",
+                                 icon: "person.3", tint: .court) { showAllPlayers = true }
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Live Sessions").font(.title2.bold())
+                        if live.isEmpty {
+                            Text("No live sessions. Create one to start.").foregroundStyle(.secondary)
+                        }
+                        Grid(horizontalSpacing: 16, verticalSpacing: 16) {
+                            ForEach(Array(stride(from: 0, to: live.count, by: 2)), id: \.self) { i in
+                                GridRow {
+                                    liveCard(live[i])
+                                    if i + 1 < live.count { liveCard(live[i + 1]) } else { Color.clear.gridCellUnsizedAxes([.horizontal, .vertical]) }
+                                }
+                            }
+                        }
+                    }
+                    if !past.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Past Sessions").font(.title2.bold())
+                            VStack(spacing: 0) {
+                                ForEach(past) { x in
+                                    pastRow(x)
+                                    if x.id != past.last?.id { Divider().padding(.leading, 18) }
+                                }
+                            }
+                            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+                        }
+                    }
+                }
+                .padding(16)
             }
-            .navigationTitle("Shuttle Queue · \(s.date.formatted(.dateTime.weekday().day().month()))")
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle("Shuttle Queue")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { ExportDataButton(sessions: sessions) } }
+            .navigationDestination(item: $open) { id in
+                ContentView(s: binding(id), others: sessions.filter { $0.id != id },
+                            onRename: { old, new in SessionState.editEverywhere(name: old, to: new, in: &sessions, except: id) },
+                            onLeave: { open = nil },
+                            onDelete: {
+                                open = nil
+                                // ponytail: removed after the pop, so the dashboard doesn't flash empty on its way out
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { sessions.removeAll { $0.id == id } }
+                            })
+            }
+            .sheet(isPresented: $creating) { NewSessionSheet(sessions: $sessions) { open = $0 }.capped() }
+            .sheet(isPresented: $showAllPlayers) { AllPlayersSheet(sessions: $sessions).capped() }
+            .confirmationDialog("Delete \(deleting?.title ?? "this session")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+                                titleVisibility: .visible, presenting: deleting) { d in
+                Button("Delete Session", role: .destructive) { sessions.removeAll { $0.id == d.id } }
+            } message: { d in
+                Text("^[\(d.games.count) game](inflect: true) and its standings are deleted. This can't be undone.")
+            }
+            .onAppear {
+                if ProcessInfo.processInfo.arguments.contains("-standings") { open = live.first?.id } // test launches open Standings directly
+            }
+        }
+        .onAppear { UIApplication.shared.isIdleTimerDisabled = true } // courtside iPad stays awake
+    }
+
+    /// A live session or the open one's data, looked up by id so other sessions can change around it.
+    private func binding(_ id: UUID) -> Binding<SessionState> {
+        Binding(get: { sessions.first { $0.id == id } ?? SessionState(id: id) },
+                set: { v in if let i = sessions.firstIndex(where: { $0.id == id }) { sessions[i] = v } })
+    }
+
+    private func liveCard(_ x: SessionState) -> some View {
+        let here = x.players.filter { $0.away != true }.count, playing = x.courts.filter { $0.match != nil }.count
+        return Button { open = x.id } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(x.title).font(.title2.bold())
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.forward").font(.headline).foregroundStyle(.white.opacity(0.7))
+                }
+                Text("\(x.name == nil ? "" : x.date.formatted(.dateTime.weekday(.wide).day().month()) + " · ")\(here) of \(x.players.count) here · ^[\(x.courts.count) court](inflect: true)")
+                    .font(.subheadline)
+                Text(playing > 0 ? "^[\(playing) game](inflect: true) on court" : x.started == nil ? "Not started" : "No games on court")
+                    .font(.subheadline.weight(.semibold))
+                TimelineView(.periodic(from: .now, by: 60)) { ctx in
+                    if let l = x.lengthLabel(now: ctx.date) { Text(l).font(.subheadline) }
+                }
+            }
+            .foregroundStyle(.white)
+            .multilineTextAlignment(.leading)
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Color.court.gradient, in: RoundedRectangle(cornerRadius: 18))
+            .contentShape(RoundedRectangle(cornerRadius: 18))
+        }
+        .buttonStyle(.plain)
+        .contextMenu { Button("Delete Session", systemImage: "trash", role: .destructive) { deleting = x } }
+    }
+
+    private func pastRow(_ x: SessionState) -> some View {
+        Button { open = x.id } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(x.title).font(.headline)
+                    Text("\(x.name == nil ? x.date.formatted(.dateTime.year()) : x.date.formatted(.dateTime.weekday().day().month().year())) · ^[\(x.players.count) player](inflect: true) · ^[\(x.games.count) game](inflect: true)\(x.ended.map { _ in " · Ended \(x.endedLabel)" } ?? "")")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.forward").font(.subheadline.weight(.semibold)).foregroundStyle(Color(.tertiaryLabel))
+            }
+            .padding(.horizontal, 18).padding(.vertical, 14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Reopen Session", systemImage: "arrow.uturn.backward") {
+                if let i = sessions.firstIndex(where: { $0.id == x.id }) { sessions[i].reopen() }
+            }
+            Button("Delete Session", systemImage: "trash", role: .destructive) { deleting = x }
+        }
+    }
+
+    private func tile(_ title: String, _ detail: LocalizedStringKey, icon: String, tint: Color, prominent: Bool = false,
+                      action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                Image(systemName: icon)
+                    .font(.title2.weight(prominent ? .bold : .regular))
+                    .foregroundStyle(prominent ? .white : tint)
+                    .frame(width: 56, height: 56)
+                    .background(Circle().fill(prominent ? .white.opacity(0.2) : tint.opacity(0.15)))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.title3.bold())
+                    Text(detail).font(.subheadline).foregroundStyle(prominent ? .white.opacity(0.85) : .secondary)
+                }
+                .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(prominent ? .white : .primary)
+            .padding(20)
+            .frame(maxWidth: .infinity, minHeight: 100, maxHeight: .infinity, alignment: .leading)
+            .background(prominent ? AnyShapeStyle(tint.gradient) : AnyShapeStyle(Color(.secondarySystemGroupedBackground)),
+                        in: RoundedRectangle(cornerRadius: 18))
+            .contentShape(RoundedRectangle(cornerRadius: 18))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+extension SessionState {
+    /// "2 h · until 9:30 PM · 1 hr, 20 min left", or "2 h · not started"; nil without a planned length.
+    func lengthLabel(now: Date) -> String? {
+        guard let h = hours else { return nil }
+        let length = "\(h.formatted()) h"
+        guard let end = endsAt else { return "\(length) · not started" }
+        let at = end.formatted(date: .omitted, time: .shortened), left = end.timeIntervalSince(now)
+        return left > 0 ? "\(length) · until \(at) · \(Duration.seconds(left).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))) left"
+                        : "\(length) · time's up (\(at))"
+    }
+}
+
+/// A new live session: name, courts, planned length, and who's coming (copied from an earlier session and/or picked from everyone).
+struct NewSessionSheet: View {
+    @Binding var sessions: [SessionState]
+    let onCreate: (UUID) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var courts = 3
+    @State private var hours = 2.0
+    @State private var picked: [String] = [] // names, in order = their order in the new session
+    @State private var source: UUID?
+    @State private var search = ""
+
+    var body: some View {
+        let pool = SessionState().returningPlayers(from: sessions)
+        let shown = search.isEmpty ? pool : pool.filter { $0.name.localizedCaseInsensitiveContains(search) }
+        let earlier = sessions.filter { !$0.players.isEmpty }.sorted { $0.date > $1.date }
+        NavigationStack {
+            Form {
+                Section("Session") {
+                    TextField("Name", text: $name, prompt: Text(Date().formatted(.dateTime.weekday().day().month())))
+                    Stepper("^[\(courts) court](inflect: true)", value: $courts, in: 1...8)
+                    Stepper("Length: \(hours.formatted()) h", value: $hours, in: 1...6, step: 0.5)
+                }
+                Section {
+                    Menu {
+                        ForEach(earlier) { x in
+                            Button("\(x.title) · ^[\(x.players.count) player](inflect: true)") { copy(from: x, pool: pool) }
+                        }
+                    } label: {
+                        Label("Copy Players from a Session", systemImage: "doc.on.doc")
+                    }
+                    .disabled(earlier.isEmpty)
+                    if pool.isEmpty { Text("No players yet. Add them inside the session.").foregroundStyle(.secondary) }
+                    ForEach(shown, id: \.name) { p in
+                        Button {
+                            if let i = picked.firstIndex(of: p.name) { picked.remove(at: i) } else { picked.append(p.name) }
+                        } label: {
+                            HStack {
+                                Image(systemName: picked.contains(p.name) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(picked.contains(p.name) ? Color.court : .secondary)
+                                    .font(.title3)
+                                Text(p.name).font(.body.weight(.semibold)).foregroundStyle(.primary)
+                                Spacer()
+                                SkillDots(skill: p.skill)
+                                Text(p.skill, format: .number.precision(.fractionLength(1)))
+                                    .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                            }
+                        }
+                        .tint(.primary)
+                    }
+                } header: {
+                    HStack {
+                        Text("Players · \(picked.count) picked")
+                        Spacer()
+                        if !pool.isEmpty {
+                            Button(picked.count == pool.count ? "Clear All" : "Select All") {
+                                picked = picked.count == pool.count ? [] : pool.map(\.name)
+                            }
+                            .font(.footnote.weight(.semibold))
+                        }
+                    }
+                } footer: {
+                    Text("Everyone starts as not here; mark them Here as they arrive. New players are added inside the session.")
+                }
+            }
+            .searchable(text: $search, prompt: "Search players")
+            .navigationTitle("New Session")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Menu("Options", systemImage: "gearshape") {
-                        Picker("Appearance", systemImage: "circle.lefthalf.filled", selection: $appearance) {
-                            Text("System").tag("system")
-                            Text("Light").tag("light")
-                            Text("Dark").tag("dark")
-                        }
-                        .pickerStyle(.menu)
-                        Button("Session Players", systemImage: "person.2") { showSessionPlayers = true }
-                        Button("All Players", systemImage: "person.3") { showAllPlayers = true }
-                        Button("Increase Pairing %", systemImage: "link") { showPairing = true }
-                        if let expiry = InstallExpiry.date { // apps installed from Xcode stop opening when their profile runs out
-                            Section("This iPad copy") { Label(InstallExpiry.label(expiry), systemImage: "clock.badge.exclamationmark") }
-                        }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Create") { create(pool) } }
+            }
+            .onAppear {
+                if let last = sessions.max(by: { $0.date < $1.date }) { courts = max(1, last.courts.count); hours = last.hours ?? 2 }
+            }
+        }
+    }
+
+    /// Checks everyone from that session, after anyone already picked.
+    private func copy(from x: SessionState, pool: [Player]) {
+        source = x.id
+        for p in x.players {
+            if let q = pool.first(where: { $0.name.lowercased() == p.name.lowercased() }), !picked.contains(q.name) { picked.append(q.name) }
+        }
+    }
+
+    private func create(_ pool: [Player]) {
+        var x = SessionState(courts: (1...courts).map { Court(name: "Court \($0)", format: .doubles) })
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        x.name = trimmed.isEmpty ? nil : trimmed
+        x.hours = hours
+        x.addReturning(picked.compactMap { n in pool.first { $0.name == n } })
+        // Locked teammates carry over from the copied session when both partners come along.
+        if let src = sessions.first(where: { $0.id == source }) {
+            x.queueMatching = src.queueMatching
+            let byName = { (n: String) in x.players.first { $0.name.lowercased() == n.lowercased() } }
+            for p in src.players {
+                guard let mate = p.lock.flatMap(src.player), let a = byName(p.name), let b = byName(mate.name) else { continue }
+                x.setLock(a.id, b.id)
+            }
+        }
+        sessions.append(x)
+        dismiss()
+        onCreate(x.id)
+    }
+}
+
+/// Settings for this session (name, length, end or reopen, mode, courts, locked teammates) and the app's appearance.
+struct SettingsSheet: View {
+    @Binding var s: SessionState
+    var others: [SessionState] = []
+    var onEnd: () -> Void = {}
+    var onDelete: () -> Void = {}
+    @AppStorage("appearance") private var appearance = "system" // applied app-wide in ShuttleQueueApp
+    @Environment(\.dismiss) private var dismiss
+    @State private var showTournamentSetup = false
+    @State private var confirmEndTournament = false
+    @State private var showScheduled = false
+    @State private var showLocks = false
+    @State private var confirmEnd = false
+    @State private var confirmDelete = false
+
+    var body: some View {
+        let playing = s.courts.filter { $0.match != nil }.count
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Name", text: Binding(get: { s.name ?? "" }, set: { s.name = $0.isEmpty ? nil : $0 }),
+                              prompt: Text(s.date.formatted(.dateTime.weekday().day().month())))
+                    Stepper("Length: \((s.hours ?? 2).formatted()) h", value: Binding(get: { s.hours ?? 2 }, set: { s.hours = $0 }), in: 1...6, step: 0.5)
+                    if s.isLive, s.endsAt != nil, let l = s.lengthLabel(now: .now) { Text(l).foregroundStyle(.secondary) }
+                    if s.isLive {
+                        Button("End Session", systemImage: "flag.checkered", role: .destructive) { confirmEnd = true }
+                            .confirmationDialog("End this session?", isPresented: $confirmEnd, titleVisibility: .visible) {
+                                Button("End Session", role: .destructive) { s.end(); dismiss(); onEnd() }
+                            } message: {
+                                if playing > 0 {
+                                    Text("^[\(playing) game](inflect: true) still on court will be cancelled. Finish them first to record winners. The session moves to Past Sessions.")
+                                } else {
+                                    Text("The session moves to Past Sessions. It can be reopened.")
+                                }
+                            }
+                    } else {
+                        Button("Reopen Session", systemImage: "arrow.uturn.backward") { s.reopen() }
                     }
-                    Menu("Add Player", systemImage: "person.badge.plus") {
-                        Button("New Player", systemImage: "person.badge.plus") { showAddPlayer = true }
-                        Button("From Earlier Sessions", systemImage: "clock.arrow.circlepath") { showReturning = true }
+                    Button("Delete Session", systemImage: "trash", role: .destructive) { confirmDelete = true }
+                        .confirmationDialog("Delete this session?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                            Button("Delete Session", role: .destructive) { dismiss(); onDelete() }
+                        } message: {
+                            Text("^[\(s.games.count) game](inflect: true) and its standings are deleted. This can't be undone.")
+                        }
+                } header: { Text("Session") } footer: {
+                    if s.ended != nil { Text("Ended \(s.endedLabel). Reopen it to play again.") }
+                }
+                Section {
+                    ExportDataButton(sessions: others + [s], currentID: s.id)
+                } header: { Text("Data") } footer: {
+                    Text("Export all sessions, players and results. Save the file, then choose Import Data in the webapp. Importing replaces sessions with the same ID.")
+                }
+                Section { Button("Scheduled Matches", systemImage: "calendar") { showScheduled = true } }
+                Section {
+                    Picker("Mode", selection: Binding(get: { s.tournament != nil },
+                                                      set: { if $0 { showTournamentSetup = true } else { confirmEndTournament = true } })) {
+                        Text("Queue").tag(false)
+                        Text("Tournament").tag(true)
                     }
-                    .disabled(s.tournament != nil)
-                    Button("Sessions", systemImage: "calendar") { showSessions = true }
-                    Button("Standings", systemImage: "trophy") { showStandings = true }
+                    .pickerStyle(.segmented)
+                } header: { Text("Mode") } footer: {
+                    Text("Queue rotates everyone through fair games. Tournament runs a round robin, then a double-elimination bracket.")
+                }
+                if s.tournament == nil {
+                    Section {
+                        Picker("Queue matching", selection: Binding(get: { s.matchingMode }, set: { s.setQueueMatching($0) })) {
+                            ForEach(QueueMatching.allCases, id: \.self) { Text($0.title).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                    } header: { Text("Queue matching") } footer: { Text(s.matchingHelp) }
+                }
+                Section("Courts") {
+                    LabeledContent("Courts", value: "\(s.courts.count)")
                     Button("Add Court", systemImage: "plus.rectangle") { s.addCourt() }
-                    Button("Fill Open Courts") { s.fillAll() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(next.isEmpty)
+                }
+                Section {
+                    Button("Locked Teammates", systemImage: "lock") { showLocks = true }
+                }
+                Section("Appearance") {
+                    Picker("Appearance", selection: $appearance) {
+                        Text("System").tag("system")
+                        Text("Light").tag("light")
+                        Text("Dark").tag("dark")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+                if let expiry = InstallExpiry.date { // apps installed from Xcode stop opening when their profile runs out
+                    Section("This iPad copy") { Label(InstallExpiry.label(expiry), systemImage: "clock.badge.exclamationmark") }
                 }
             }
-            .sheet(isPresented: $showSessions) { SessionsSheet(s: $s, past: $past) }
-            .fullScreenCover(isPresented: $showStandings) { StandingsSheet(s: $s) }
-            .sheet(isPresented: $showAllPlayers) { AllPlayersSheet(sessions: [s] + past) }
-            .sheet(isPresented: $showSessionPlayers) {
-                SessionPlayersSheet(s: $s, past: past) { p, name, skill, pref, paused, present in save(p, name: name, skill: skill, pref: pref, paused: paused, present: present) }
-            }
-            .sheet(isPresented: $showPairing) { PairingSheet(s: $s) }
-            .sheet(isPresented: $showTournamentSetup) { TournamentSetup(s: $s) }
-            .sheet(isPresented: $showReturning) { ReturningPlayersSheet(s: $s, past: past) }
-            .sheet(isPresented: $showAddPlayer) { AddPlayerSheet(s: $s) }
-            .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-                                titleVisibility: .visible, presenting: removing) { p in
-                Button("Remove \(p.name)", role: .destructive) { s.players.removeAll { $0.id == p.id } }
-            } message: { _ in
-                Text("They leave this session's queue. Games they played stay in the history.")
-            }
-            .sheet(item: $replacing) { r in ReplacePlayerSheet(s: $s, target: r) }
-            .sheet(item: $editing) { p in
-                EditPlayerSheet(player: p, played: s.played(p.id), won: s.wins(p.id),
-                                takenNames: Set(s.players.filter { $0.id != p.id }.map { $0.name.lowercased() })) { name, skill, pref, paused, present in
-                    save(p, name: name, skill: skill, pref: pref, paused: paused, present: present)
-                }
-            }
+            .navigationTitle("Session Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .sheet(isPresented: $showTournamentSetup) { TournamentSetup(s: $s).capped() }
+            .sheet(isPresented: $showScheduled) { ScheduledMatchesSheet(s: $s).capped() }
+            .sheet(isPresented: $showLocks) { LockSheet(s: $s).capped() }
             .confirmationDialog("End the tournament and go back to the queue?", isPresented: $confirmEndTournament, titleVisibility: .visible) {
                 Button("End Tournament", role: .destructive) { s.tournament = nil }
             } message: {
                 Text("Games already played stay in Match History and Standings.")
             }
         }
-        .onAppear { UIApplication.shared.isIdleTimerDisabled = true } // courtside iPad stays awake
+    }
+}
+
+/// The dashboard: courts on the left, Up Next and the queue on the right. Opened from the Home menu.
+struct ContentView: View {
+    @Binding var s: SessionState
+    let others: [SessionState] // every other session, for players from earlier sessions
+    var onRename: (_ old: String, _ new: String) -> Void = { _, _ in } // keeps a renamed player one person across sessions
+    var onLeave: () -> Void = {}
+    var onDelete: () -> Void = {}
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var textSize
+    @ScaledMetric(relativeTo: .body) private var queuePanelWidth = 280
+    @ScaledMetric(relativeTo: .body) private var courtMinimumWidth = 300
+    @State private var showQueue = false
+    @State private var showSettings = false
+    @State private var showStandings = ProcessInfo.processInfo.arguments.contains("-standings") // test launches open it directly
+    @State private var showSessionPlayers = false
+    @State private var showAddPlayer = false
+    @State private var removing: Player?
+    @State private var finishing: Court?
+    @State private var showReturning = false
+    @State private var editing: Player?
+    @State private var replacing: ReplaceTarget?
+    @State private var removingCourt: Court?
+    @State private var scheduleTick = Date()
+    @State private var choosing: Court? // manual mode: the court whose players are being picked
+
+    var body: some View {
+        let _ = scheduleTick
+        // The matching runs once per screen update; every court card, the Fill button and Up Next read from it.
+        let up = s.upNext
+        let next = s.openCourtPairings(up)
+        GeometryReader { geometry in
+            let split = geometry.size.width >= max(650, courtMinimumWidth + queuePanelWidth + 48)
+            VStack(spacing: 0) {
+                if !split {
+                    Picker("Session view", selection: $showQueue) {
+                        Text("Courts").tag(false)
+                        Text("Queue").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(12)
+                }
+                HStack(spacing: 0) {
+                    if split || !showQueue {
+                        courtsArea(next, width: geometry.size.width - (split ? queuePanelWidth + 1 : 0))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(Color(.systemGroupedBackground))
+                    }
+                    if split { Divider() }
+                    if split || showQueue {
+                        queuePanel(up)
+                            .frame(width: split ? queuePanelWidth : nil)
+                    }
+                }
+            }
+        }
+        .onAppear { s.refreshSchedule() }
+        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { tick in
+                s.refreshSchedule()
+                if (s.scheduled ?? []).contains(where: { !s.scheduledDone($0) && !s.scheduledPlaying($0) }) { scheduleTick = tick }
+            }
+        .navigationTitle(s.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden()
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { dismiss() } label: { Label("Menu", systemImage: "chevron.backward").labelStyle(.titleAndIcon) }
+            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button("Settings", systemImage: "gearshape") { showSettings = true }
+                Menu("Players", systemImage: "person.badge.plus") {
+                    Button("New Player", systemImage: "person.badge.plus") { showAddPlayer = true }.disabled(s.tournament != nil)
+                    Button("From Earlier Sessions", systemImage: "clock.arrow.circlepath") { showReturning = true }.disabled(s.tournament != nil)
+                    Button("Session Players", systemImage: "person.2") { showSessionPlayers = true }
+                }
+                Button("Standings", systemImage: "trophy") { showStandings = true }
+                Button(textSize >= .xxLarge ? "Start All" : "Start Ready Courts") { s.fillAll(shown: next) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(next.isEmpty || !s.isLive)
+                    .accessibilityLabel("Start all ready courts")
+            }
+        }
+        .sheet(isPresented: $showSettings) { SettingsSheet(s: $s, others: others, onEnd: onLeave, onDelete: onDelete).capped() }
+        .fullScreenCover(isPresented: $showStandings) { StandingsSheet(s: $s).capped() }
+        .sheet(isPresented: $showSessionPlayers) {
+            SessionPlayersSheet(s: $s, past: others) { p, name, skill, pref, paused, present in save(p, name: name, skill: skill, pref: pref, paused: paused, present: present) }.capped()
+        }
+        .sheet(isPresented: $showReturning) { ReturningPlayersSheet(s: $s, past: others).capped() }
+        .sheet(isPresented: $showAddPlayer) { AddPlayerSheet(s: $s).capped() }
+        .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            titleVisibility: .visible, presenting: removing) { p in
+            Button("Remove \(p.name)", role: .destructive) { s.players.removeAll { $0.id == p.id } }
+        } message: { _ in
+            Text("They leave this session's queue. Games they played stay in the history.")
+        }
+        .sheet(item: $replacing) { r in ReplacePlayerSheet(s: $s, target: r).capped() }
+        .sheet(item: $choosing) { c in ManualLineupSheet(s: $s, courtID: c.id).capped() }
+        .sheet(item: $editing) { p in
+            EditPlayerSheet(player: p, played: s.played(p.id), won: s.wins(p.id),
+                            takenNames: Set(s.players.filter { $0.id != p.id }.map { $0.name.lowercased() })) { name, skill, pref, paused, present in
+                save(p, name: name, skill: skill, pref: pref, paused: paused, present: present)
+            }.capped()
+        }
+    }
+
+    /// A rename also applies to this person in the other sessions, so they stay one person in All Players and
+    /// "From Earlier Sessions".
+    private func save(_ p: Player, name: String, skill: Double, pref: Preference, paused: Bool, present: Bool) {
+        savePlayer(p, name: name, skill: skill, pref: pref, paused: paused, present: present, s: &s)
+        if p.name.lowercased() != name.lowercased() { onRename(p.name, name) }
     }
 
     // MARK: Courts
 
-    /// Courts at their true 2.2 : 1 shape, one column in portrait, two in landscape.
-    private func courtsArea(_ next: [UUID: Pairing]) -> some View {
+    /// Court columns scale with text size and stay within the available panel width.
+    private func courtsArea(_ next: [UUID: Pairing], width: CGFloat) -> some View {
         ScrollView {
-            // ponytail: 380 = the widest two landscape columns fit; portrait gets one 408-point court (20% over the old 340)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 380), spacing: 12)], spacing: 12) {
+            if s.ended != nil {
+                Label("Ended \(s.endedLabel). Reopen it in Session Settings to play.", systemImage: "flag.checkered")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                    .padding([.horizontal, .top], 12)
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: min(courtMinimumWidth, max(1, width - 24))), spacing: 12)], spacing: 12) {
                 ForEach($s.courts) { $court in courtCard($court, next: next[court.id]) }
             }
             .padding(12)
@@ -114,44 +535,67 @@ struct ContentView: View {
 
     private func courtCard(_ court: Binding<Court>, next: Pairing?) -> some View {
         let c = court.wrappedValue
-        let teams = c.match.map { m in (m.teamA.compactMap(s.player), m.teamB.compactMap(s.player)) } ?? next.map { ($0.a, $0.b) }
+        let scheduled = s.scheduledOnCourt(c.id)
+        let slots = s.manualSlots(c), half = c.format.needed / 2 // manual mode: the players picked so far
+        let teams = c.match.map { m in (m.teamA.compactMap(s.player), m.teamB.compactMap(s.player)) }
+            ?? slots.map { m in (m[..<half].compactMap { $0 }.compactMap(s.player), m[half...].compactMap { $0 }.compactMap(s.player)) }
+            ?? next.map { ($0.a, $0.b) }
         let t = s.tournament
+        let tap: ((Player) -> Void)? = slots != nil ? { _ in choosing = c }
+            : t == nil && next != nil && next?.scheduled == nil ? { p in replacing = ReplaceTarget(courtID: c.id, courtName: c.name, out: p) } : nil
         let format = t?.format ?? c.format
         let gameLabel = (c.match?.tournamentMatch ?? next?.match).flatMap { id in t.map { $0.matches[id].label } }
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(c.name).font(.title3.bold()).fixedSize()
+                Text(c.name).font(.headline).lineLimit(2)
+                Text(c.match != nil ? "Playing" : !s.isLive ? "Ended" : next?.scheduled != nil ? "Scheduled · Locked" : next != nil ? "Ready" : "Waiting")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(c.match != nil ? Color.playingCourt : next != nil ? Color.court : .secondary)
+                    .padding(.horizontal, 8).padding(.vertical, 5)
+                    .background((c.match != nil ? Color.playingCourt : Color.court).opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
                 Spacer()
                 if let t {
                     Text(t.format.rawValue.capitalized).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
                 } else {
                     Picker("Format", selection: court.format) {
-                        ForEach(Format.allCases, id: \.self) { Text($0.rawValue.capitalized) }
+                        ForEach(Format.allCases, id: \.self) { f in
+                            Image(systemName: f == .singles ? "person.fill" : "person.2.fill").accessibilityLabel(f.rawValue.capitalized)
+                        }
                     }
                     .pickerStyle(.segmented)
-                    .frame(maxWidth: 200)
-                    .disabled(c.match != nil)
+                    .frame(width: 110)
+                    .disabled(c.match != nil || scheduled != nil)
                 }
                 Menu {
                     if c.match != nil {
                         Button("Undo Start", systemImage: "arrow.uturn.backward") { s.undoStart(c.id) }
+                    } else if let scheduled {
+                        Button("Postpone 10 min", systemImage: "clock.arrow.circlepath") { s.postponeScheduled(scheduled.id) }
+                        Button("Cancel Request", systemImage: "xmark", role: .destructive) { s.cancelScheduled(scheduled.id) }
+                    } else if t == nil {
+                        Button("Choose Players", systemImage: "hand.point.up.left") { if c.manual == nil { s.setManual(true, on: c.id) }; choosing = c }
+                        if c.manual != nil { Button("Back to Automatic", systemImage: "wand.and.stars") { s.setManual(false, on: c.id) } }
                     }
-                    Button("Remove \(c.name)", systemImage: "trash", role: .destructive) {
-                        s.courts.removeAll { $0.id == c.id }
-                    }
-                    .disabled(c.match != nil)
+                    Button("Remove \(c.name)", systemImage: "trash", role: .destructive) { removingCourt = c }
+                    .disabled(c.match != nil || scheduled != nil)
                 } label: {
                     Image(systemName: "ellipsis.circle").font(.title3).padding(.leading, 4)
                 }
                 .accessibilityLabel("\(c.name) options")
+                .confirmationDialog("Remove \(c.name)?", isPresented: Binding(get: { removingCourt?.id == c.id }, set: { if !$0 { removingCourt = nil } }),
+                                    titleVisibility: .visible) {
+                    Button("Remove \(c.name)", role: .destructive) { if s.scheduledOnCourt(c.id) == nil { s.courts.removeAll { $0.id == c.id } } }
+                } message: {
+                    Text("Its games stay in Match History.")
+                }
             }
             .padding(.horizontal)
 
             // Edge to edge inside the card, so the court gets the full width
-            CourtDrawing(format: format, teams: teams, isPreview: c.match == nil,
-                         onTap: t == nil && next != nil ? { p in replacing = ReplaceTarget(courtID: c.id, courtName: c.name, out: p) } : nil,
-                         locked: c.locked, onLock: t == nil && next != nil ? { side in s.lock(c.locked == side ? nil : side, on: c.id) } : nil)
+            CourtDrawing(format: format, teams: teams, isPreview: c.match == nil, rallyID: c.id.uuidString, rallySince: c.match?.start, boost: { s.streakBoost($0) },
+                         onTap: tap,
+                         locked: c.locked, onLock: t == nil && next != nil && slots == nil && next?.scheduled == nil ? { side in s.lock(c.locked == side ? nil : side, on: c.id) } : nil)
 
             HStack {
                 if let m = c.match {
@@ -162,27 +606,30 @@ struct ContentView: View {
                     Spacer()
                     Button("Finish Game") { finishing = c }
                         .buttonStyle(.borderedProminent)
-                        .tint(.blue) // Start is green; Finish reads differently at a glance
+                        .tint(.blue) // Finish stays distinct from the cyan Start action
                         .confirmationDialog("Who won on \(c.name)?", isPresented: Binding(get: { finishing?.id == c.id }, set: { if !$0 { finishing = nil } }),
                                             titleVisibility: .visible) {
                             Button(names(m.teamA)) { s.finish(c.id, winner: 0) }
                             Button(names(m.teamB)) { s.finish(c.id, winner: 1) }
-                            Button("No result") { s.finish(c.id, winner: nil) }
+                            Button("Cancel Game (no result)") { s.finish(c.id, winner: nil) }
                         }
                 } else {
-                    let short = format.needed - s.eligible(format).count
-                    Text(next != nil ? "Next up\(gameLabel.map { " · \($0)" } ?? "")\(next?.note.map { " · \($0)" } ?? "")"
+                    let short = format.needed - s.eligible(format).count, missing = slots?.filter { $0 == nil }.count ?? 0
+                    Text(slots != nil ? (missing > 0 ? "Choose \(missing) more" : "Next up · by hand")
+                         : next != nil ? "Next up\(gameLabel.map { " · \($0)" } ?? "")\(next?.note.map { " · \($0)" } ?? "")"
                          : t?.champion != nil ? "Tournament complete"
                          : t == nil && short > 0 ? "Need \(short) more for \(format.rawValue)" : "Waiting for players")
                         .foregroundStyle(.secondary)
                         // The note takes what's left and never pushes the buttons: at most two lines, then it shrinks or trims.
                         .lineLimit(2).minimumScaleFactor(0.8)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    if t == nil, let next, next.options > 1 { shuffleButton(c, singles: next.format == .singles).fixedSize() }
-                    Button("Start \(format.rawValue.capitalized)") { s.fill(c.id) }
+                    if slots != nil {
+                        Button("Choose Players", systemImage: "hand.point.up.left") { choosing = c }.labelStyle(.iconOnly).buttonStyle(.bordered).fixedSize()
+                    } else if t == nil, let next, next.options > 1 { shuffleButton(c, singles: next.format == .singles).fixedSize() }
+                    Button("Start \(format.rawValue.capitalized)") { s.fill(c.id, shown: next) }
                         .buttonStyle(.borderedProminent)
                         .fixedSize()
-                        .disabled(next == nil)
+                        .disabled(next == nil || !s.isLive)
                 }
             }
             .font(.subheadline)
@@ -191,11 +638,10 @@ struct ContentView: View {
         }
         .padding(.vertical)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
-        // Courts with a game in progress glow softly orange.
         .overlay {
-            if c.match != nil { RoundedRectangle(cornerRadius: 14).strokeBorder(Color.orange.opacity(0.5), lineWidth: 1.5) }
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(c.match != nil ? Color.playingCourt.opacity(0.5) : Color.primary.opacity(0.08), lineWidth: 1)
         }
-        .shadow(color: c.match != nil ? Color.orange.opacity(0.4) : .clear, radius: 10)
     }
 
     private func shuffleButton(_ c: Court, singles: Bool) -> some View {
@@ -209,13 +655,12 @@ struct ContentView: View {
 
     private func queuePanel(_ upNext: [Pairing]) -> some View {
         List {
-            Section {
-                Picker("Mode", selection: Binding(get: { s.tournament != nil },
-                                                  set: { if $0 { showTournamentSetup = true } else { confirmEndTournament = true } })) {
-                    Text("Queue").tag(false)
-                    Text("Tournament").tag(true)
+            if s.isLive, s.endsAt != nil {
+                Section {
+                    TimelineView(.periodic(from: .now, by: 60)) { ctx in
+                        Label(s.lengthLabel(now: ctx.date) ?? "", systemImage: "clock").font(.subheadline.weight(.semibold))
+                    }
                 }
-                .pickerStyle(.segmented)
             }
 
             if let t = s.tournament {
@@ -226,9 +671,9 @@ struct ContentView: View {
                         }
                     }
                 }
-            } else if !s.courts.isEmpty {
-                Section("Up Next") {
-                    ForEach(s.courts) { c in
+            } else if s.courts.contains(where: { $0.match != nil }) {
+                Section("After this game · projected") {
+                    ForEach(s.courts.filter { $0.match != nil }) { c in
                         upNextRow("\(c.name) · \(c.format.rawValue)\(c.match != nil ? " · after this game" : "")".uppercased(),
                                   format: c.format, pairing: upNext.first { $0.court == c.id })
                     }
@@ -249,21 +694,29 @@ struct ContentView: View {
             } header: {
                 Text("Queue · \(s.queue.count) off court · \(s.onCourt.count) playing")
             } footer: {
-                Text((s.balancedOnly && !s.courts.isEmpty ? "Balanced teams: fewer than \(8 * s.courts.count) players for \(s.courts.count) doubles court\(s.courts.count == 1 ? "" : "s"), so games mix levels with even teams instead of similar-skill groups. " : "")
-                     + "Tap a player to edit. Press and hold to sit out, move to front, or remove. Fewest games played goes first (on a tie, whoever is hardest to match), then longest rested; similar skill is matched first.")
+                DisclosureGroup("Queue rules") {
+                    Text(s.matchingHelp + " Fewest counted games first, then longest rested. Recalls retain game-count protections. Both exact teams need another opponent before a rematch. There is no time-based overdue priority.")
+                }
             }
             let away = s.players.filter { $0.away == true }
             if !away.isEmpty {
                 Section {
                     ForEach(away) { p in
-                        HStack(spacing: 10) {
-                            Text(p.name).font(.body.weight(.semibold)).lineLimit(1)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .onTapGesture { editing = p }
-                            SkillDots(skill: p.skill)
+                        HStack(alignment: .center, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(p.name).font(.body.weight(.semibold))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                SkillDots(skill: p.skill, boost: s.streakBoost(p.id))
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .onTapGesture { editing = p }
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityHint("Edit player")
                             Button("Here") { s.arrive(p.id) }
                                 .buttonStyle(.bordered).tint(Color.court)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .frame(minHeight: 44)
                                 .accessibilityLabel("\(p.name) is here")
                         }
                     }
@@ -290,10 +743,16 @@ struct ContentView: View {
                 .frame(minWidth: 28, alignment: .trailing)
                 .accessibilityLabel(position.map { "Number \($0)" } ?? "Sitting out")
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(p.name).font(.body.weight(.semibold)).lineLimit(1)
-                    Text("\(s.played(p.id)) played · \(s.wins(p.id)) won")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(1).minimumScaleFactor(0.7)
+                    Text(p.name).font(.body.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                    // Minutes waited, on the wait rule's clock; orange from 20, when the rule puts them in the next game.
+                    TimelineView(.periodic(from: .now, by: 30)) { ctx in
+                        let mins = s.started == nil || !s.isLive ? nil : Int(ctx.date.timeIntervalSince(s.waitStart(p)) / 60)
+                        (Text("\(s.played(p.id)) played\(s.scheduledPenalties[p.id, default: 0] > 0 ? " · priority cooldown \(s.scheduledPenalties[p.id]!)" : "")\(s.isLocked(p) ? " · with \(s.player(p.lock!)?.name ?? "")" : "")")
+                         + Text(mins.map { " · \($0) min" } ?? ""))
+                            .font(.caption).foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
                 }
                 Spacer(minLength: 4)
             }
@@ -301,35 +760,30 @@ struct ContentView: View {
             .onTapGesture { editing = p }
             .accessibilityAddTraits(.isButton)
             .accessibilityHint("Edit name or rating")
-            // Rating with what they play underneath, so the name and stats keep the row's width
-            VStack(spacing: 4) {
-                VStack(spacing: 1) {
-                    SkillDots(skill: p.skill).padding(.vertical, -4)
-                    Text(p.skill, format: .number.precision(.fractionLength(1)))
-                        .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
-                }
-                .onTapGesture { editing = p }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Skill \(skillNames[p.level - 1]), rating \(p.skill.formatted(.number.precision(.fractionLength(1))))")
-                prefMenu(p)
+            Menu { playerActions(p) } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
-            .fixedSize()
+            .accessibilityLabel("Actions for \(p.name)")
         }
         .opacity(p.paused ? 0.5 : 1)
         // Press and hold: a narrow column makes swipes easy to overshoot into Remove.
-        .contextMenu {
-            Button("Edit Name or Rating", systemImage: "pencil") { editing = p }
-            Button(p.paused ? "Back In" : "Sit Out", systemImage: p.paused ? "play" : "pause") {
-                s.update(p.id) { $0.paused.toggle() } // the wait clock keeps running while sitting out
-            }
-            Button("Move to Front", systemImage: "arrow.up.to.line") { s.moveToFront(p.id) }
-            Button("Not Here", systemImage: "person.slash") { s.update(p.id) { $0.away = true } }
-            Divider()
-            Button("Remove from Session", systemImage: "trash", role: .destructive) { removing = p }
-        }
+        .contextMenu { playerActions(p) }
     }
 
-    /// One court's next game in Up Next: team on one line, a red VS, the other team underneath.
+    @ViewBuilder private func playerActions(_ p: Player) -> some View {
+        Button("Edit Name or Rating", systemImage: "pencil") { editing = p }
+        Button(p.paused ? "Back In" : "Sit Out", systemImage: p.paused ? "play" : "pause") {
+            s.update(p.id) { $0.paused.toggle() } // the wait clock keeps running while sitting out
+        }
+        Button("Move to Front", systemImage: "arrow.up.to.line") { s.moveToFront(p.id) }
+        Button("Not Here", systemImage: "person.slash") { s.update(p.id) { $0.away = true } }
+        Divider()
+        Button("Remove from Session", systemImage: "trash", role: .destructive) { removing = p }
+    }
+
+    /// A busy court's projected next game.
     private func upNextRow(_ label: String, format: Format, pairing p: Pairing?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label)
@@ -337,10 +791,10 @@ struct ContentView: View {
                 .foregroundStyle(format == .singles ? Color.singles : Color.doubles)
             if let p {
                 Text(names(p.a.map(\.id))).font(.subheadline.weight(.semibold))
-                Text("VS").font(.caption.weight(.heavy)).foregroundStyle(.red)
+                Text("vs").font(.caption).foregroundStyle(.secondary)
                 Text(names(p.b.map(\.id))).font(.subheadline.weight(.semibold))
             } else {
-                Text("Waiting for available players").font(.subheadline).foregroundStyle(.secondary)
+                Text(s.waitingMessage).font(.subheadline).foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 2)
@@ -362,23 +816,15 @@ struct ContentView: View {
         }
     }
 
-    /// Saves an edit. A rename also applies to this person in earlier sessions, so they stay one person
-    /// in "Add from Earlier Sessions".
-    private func save(_ p: Player, name: String, skill: Double, pref: Preference, paused: Bool, present: Bool) {
-        let old = p.name.lowercased()
-        s.update(p.id) { $0.name = name; $0.skill = skill; $0.pref = pref; $0.paused = paused }
-        if present { s.arrive(p.id) } else { s.update(p.id) { $0.away = true } }
-        guard old != name.lowercased() else { return }
-        for i in past.indices {
-            for j in past[i].players.indices where past[i].players[j].name.lowercased() == old {
-                past[i].players[j].name = name
-            }
-        }
-    }
-
     private func names(_ ids: [UUID]) -> String {
         ids.compactMap { s.player($0)?.name }.joined(separator: " & ")
     }
+}
+
+/// Saves a player edit in one session.
+func savePlayer(_ p: Player, name: String, skill: Double, pref: Preference, paused: Bool, present: Bool, s: inout SessionState) {
+    s.update(p.id) { $0.name = name; $0.skill = skill; $0.pref = pref; $0.paused = paused }
+    if present { s.arrive(p.id) } else { s.update(p.id) { $0.away = true } }
 }
 
 struct ReplaceTarget: Identifiable {
@@ -400,7 +846,9 @@ struct ReplacePlayerSheet: View {
     var body: some View {
         let all = s.replacements(for: target.out.id, on: target.courtID)
         // Best fit: keeps the game even and is close to the replaced player's level. Everyone else, closest level first.
-        let gap = { (p: Player) in abs(p.skill - target.out.skill) }
+        // Judged on ratings with streak boosts; the rows still show real ratings.
+        let format = s.courts.first { $0.id == target.courtID }?.format ?? .doubles
+        let gap = { (p: Player) in abs(s.matchSkill(p.id, format: format) - s.matchSkill(target.out.id, format: format)) }
         let best = all.filter { $0.even && gap($0.player) <= 1 }
         let rest = all.filter { !($0.even && gap($0.player) <= 1) }.sorted { gap($0.player) < gap($1.player) }
         NavigationStack {
@@ -452,12 +900,12 @@ struct ReplacePlayerSheet: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(p.name).font(.body.weight(.semibold)).foregroundStyle(.primary)
-                    Text("\(s.played(p.id)) played\(uneven ? " · makes it uneven" : "")\(from.map { " · next up on \($0)" } ?? "")")
+                    Text("\(s.played(p.id)) played\(s.streakBoost(p.id) > 0 ? " · on a win streak" : "")\(uneven ? " · makes it uneven" : "")\(from.map { " · next up on \($0)" } ?? "")")
                         .font(.caption).foregroundStyle(from == nil && !uneven ? Color.secondary : Color.singles)
                 }
                 Spacer()
                 VStack(spacing: 1) {
-                    SkillDots(skill: p.skill).padding(.vertical, -4)
+                    SkillDots(skill: p.skill, boost: s.streakBoost(p.id)).padding(.vertical, -4)
                     Text(p.skill, format: .number.precision(.fractionLength(1)))
                         .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                 }
@@ -478,6 +926,7 @@ struct EditPlayerSheet: View {
     let played: Int
     let won: Int
     let takenNames: Set<String>
+    var sessionFields = true // false in All Players: name and rating only, applied to every session
     let onSave: (_ name: String, _ skill: Double, _ pref: Preference, _ paused: Bool, _ present: Bool) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
@@ -495,7 +944,7 @@ struct EditPlayerSheet: View {
                 Section {
                     TextField("Name", text: $name).font(.title3.weight(.semibold))
                 } footer: {
-                    if duplicate { Text("Another player in this session is already called \(trimmed).").foregroundStyle(.red) }
+                    if duplicate { Text("Another player\(sessionFields ? " in this session" : "") is already called \(trimmed).").foregroundStyle(.red) }
                 }
                 Section {
                     HStack {
@@ -512,15 +961,17 @@ struct EditPlayerSheet: View {
                     } maximumValueLabel: {
                         Text("5")
                     }
-                    Picker("Set level", selection: Binding(get: { min(5, max(1, Int(skill.rounded()))) }, set: { skill = Double($0) })) {
+                    Picker("Set level", selection: Binding(get: { min(5, max(1, Int(skill.rounded()))) }, set: { skill = skillPresets[$0 - 1] })) {
                         ForEach(1...5, id: \.self) { Text("\($0)").tag($0) }
                     }
                     .pickerStyle(.segmented)
                 } header: {
                     Text("Rating")
                 } footer: {
-                    Text("Wins and losses keep adjusting this. \(played) played · \(won) won this session.")
+                    Text(sessionFields ? "Wins and losses keep adjusting this. \(played) played · \(won) won this session."
+                                       : "Changes their name and rating in every session they're in. \(played) played · \(won) won in all.")
                 }
+                if sessionFields {
                 Section {
                     Picker("Plays", selection: $pref) {
                         ForEach(Preference.allCases, id: \.self) { Text($0.rawValue.capitalized) }
@@ -536,6 +987,7 @@ struct EditPlayerSheet: View {
                     Toggle("Present", isOn: $present)
                 } footer: {
                     Text("Off until they arrive. Turned on, they join the line like a late arrival, with their wait starting then.")
+                }
                 }
             }
             .navigationTitle("Edit Player")
@@ -612,89 +1064,18 @@ struct ReturningPlayersSheet: View {
     }
 }
 
-struct SessionsSheet: View {
-    @Binding var s: SessionState
-    @Binding var past: [SessionState]
-    @Environment(\.dismiss) private var dismiss
-    @State private var deleting: SessionState?
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    Button("New Session with Same Players", systemImage: "person.2") { start(s.next(keepPlayers: true)) }
-                    Button("New Empty Session", systemImage: "plus") { start(s.next(keepPlayers: false)) }
-                }
-                Section("Current") { row(s).swipeActions { deleteAction(s) } }
-                if !past.isEmpty {
-                    Section("Earlier") {
-                        ForEach(past.sorted { $0.date > $1.date }) { old in
-                            Button { open(old) } label: { row(old) }
-                                .tint(.primary)
-                                .swipeActions { deleteAction(old) }
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Sessions")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Done") { dismiss() } }
-            .confirmationDialog("Delete this session and its results?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
-                                titleVisibility: .visible, presenting: deleting) { d in
-                Button("Delete Session", role: .destructive) { delete(d) }
-            } message: { d in
-                Text("\(d.date.formatted(date: .abbreviated, time: .shortened)) · ^[\(d.results.count) game](inflect: true). This can't be undone.")
-            }
-        }
-    }
-
-    private func row(_ x: SessionState) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(x.date.formatted(.dateTime.weekday(.wide).day().month().hour().minute())).font(.body.weight(.semibold))
-            Text("\(x.tournament == nil ? "" : "Tournament · ")^[\(x.players.count) player](inflect: true) · ^[\(x.results.count) game](inflect: true)").font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
-    private func deleteAction(_ x: SessionState) -> some View {
-        Button("Delete", systemImage: "trash", role: .destructive) { deleting = x }
-    }
-
-    private func start(_ fresh: SessionState) {
-        past.append(s)
-        s = fresh
-        dismiss()
-    }
-
-    private func open(_ old: SessionState) {
-        past.removeAll { $0.id == old.id }
-        past.append(s)
-        s = old
-        dismiss()
-    }
-
-    private func delete(_ d: SessionState) {
-        if d.id == s.id {
-            // Deleting the one on screen: fall back to the most recent earlier session, or a fresh one.
-            let latest = past.max { $0.date < $1.date }
-            past.removeAll { $0.id == latest?.id }
-            s = latest ?? s.next(keepPlayers: false)
-        } else {
-            past.removeAll { $0.id == d.id }
-        }
-    }
-}
-
 struct StandingsSheet: View {
     @Binding var s: SessionState
     @Environment(\.dismiss) private var dismiss
     @State private var tab = "Standings"
+    @State private var editingGame: Int? // index into results
 
     var body: some View {
         NavigationStack {
             List {
                 if tab == "Standings" { standings } else { history }
             }
-            .navigationTitle("^[\(s.results.count) game](inflect: true) played")
+            .navigationTitle("^[\(s.games.count) game](inflect: true) played")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -711,47 +1092,67 @@ struct StandingsSheet: View {
     }
 
     @ViewBuilder private var standings: some View {
-        let rows = s.players
+        let all = s.players
             .map { (p: $0, w: s.wins($0.id), n: s.played($0.id), score: s.score($0.id)) }
-            .sorted { ($0.n > 0 ? 1 : 0, $0.score, $0.w) > ($1.n > 0 ? 1 : 0, $1.score, $1.w) } // anyone yet to play goes last
-        if rows.isEmpty { Text("No players yet.").foregroundStyle(.secondary) }
-        let top = Array(rows.filter { $0.w > 0 }.prefix(3))
+            .sorted { ($0.score, $0.w, $1.p.name) > ($1.score, $1.w, $0.p.name) }
+        // Ranked: enough games (75% of the median). Played fewer: listed, not ranked. Yet to play: last.
+        let minimum = s.rankingMinimum
+        let ranked = all.filter { $0.n >= minimum }, short = all.filter { $0.n > 0 && $0.n < minimum }, unplayed = all.filter { $0.n == 0 }
+        if all.isEmpty { Text("No players yet.").foregroundStyle(.secondary) }
+        let places = Self.places(ranked.map(\.score))
+        let top = (1...3).map { k in ranked.indices.filter { places[$0] == k && ranked[$0].w > 0 }.map { ranked[$0] } }.prefix { !$0.isEmpty }
         if !top.isEmpty {
-            Section { podium(top) }.listRowBackground(Color.clear)
+            Section { podium(Array(top)) }.listRowBackground(Color.clear)
         }
         Section {
-            ForEach(Array(rows.enumerated()), id: \.element.p.id) { i, r in
-                HStack(spacing: 12) {
-                    // Rank, in medal colours for the top three; anyone yet to play has no rank.
-                    Text(r.n > 0 ? "\(i + 1)" : "–")
-                        .font(.subheadline.weight(.heavy)).monospacedDigit()
-                        .foregroundStyle(r.n > 0 && i < 3 ? .white : .secondary)
-                        .frame(width: 28, height: 28)
-                        .background(Circle().fill(r.n > 0 && i < 3 ? PodiumPlace.medal(i + 1)[1] : Color(.tertiarySystemFill)))
-                    Text(r.p.name).font(.body.weight(.semibold))
-                    Spacer()
-                    Grid(horizontalSpacing: 18) {
-                        GridRow {
-                            stat(r.w, "Won")
-                            stat(r.n, "Played")
-                            stat(r.n == 0 ? nil : Int((Double(r.w) * 100 / Double(r.n)).rounded()), "Win %")
-                            stat(r.n == 0 ? nil : r.score, "Score")
-                        }
-                    }
-                }
-            }
+            ForEach(Array(ranked.enumerated()), id: \.element.p.id) { i, r in standingRow(r, rank: places[i]) }
         } header: {
-            if !top.isEmpty { Text("All players") }
+            if !top.isEmpty { Text("Ranked") }
         } footer: {
-            Text("Ranked by Score: wins and losses decide it, and game length nudges it: a quicker, more one-sided win counts a little more, and a close loss still counts a little. Score starts everyone at 50 so one or two lucky games can't top the table.")
+            Text("Ranked by Score: the win rate, starting everyone at 50 (two extra wins and two extra losses) so one or two lucky games can't top the table. Equal scores share a place. Ranking needs ^[\(minimum) game](inflect: true), three quarters of a typical night here.")
+        }
+        if !short.isEmpty || !unplayed.isEmpty {
+            Section("Not ranked · played under \(minimum)") {
+                ForEach(short + unplayed, id: \.p.id) { r in standingRow(r, rank: nil) }
+            }
         }
     }
 
-    /// Top three with a win, laid out 2nd · 1st · 3rd on a court-green stage.
-    private func podium(_ top: [(p: Player, w: Int, n: Int, score: Double)]) -> some View {
+    /// Places for scores sorted high to low: equal scores (equal records) share a place, and the next score takes the
+    /// next place: 1, 1, 1, 2, 3, 3.
+    static func places(_ scores: [Double]) -> [Int] {
+        var out: [Int] = []
+        for (i, s) in scores.enumerated() { out.append(i > 0 && s == scores[i - 1] ? out[i - 1] : (out.last ?? 0) + 1) }
+        return out
+    }
+
+    private func standingRow(_ r: (p: Player, w: Int, n: Int, score: Double), rank: Int?) -> some View {
+        HStack(spacing: 12) {
+            // Rank, in medal colours for the top three; anyone not ranked has a dash.
+            Text(rank.map { "\($0)" } ?? "–")
+                .font(.subheadline.weight(.heavy)).monospacedDigit()
+                .foregroundStyle((rank ?? 4) <= 3 ? .white : .secondary)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill((rank ?? 4) <= 3 ? PodiumPlace.medal(rank ?? 1)[1] : Color(.tertiarySystemFill)))
+            Text(r.p.name).font(.body.weight(.semibold))
+            Spacer()
+            Grid(horizontalSpacing: 18) {
+                GridRow {
+                    stat(r.w, "Won")
+                    stat(r.n, "Played")
+                    stat(r.n == 0 ? nil : Int((Double(r.w) * 100 / Double(r.n)).rounded()), "Win %")
+                    stat(r.n == 0 ? nil : r.score, "Score")
+                }
+            }
+        }
+    }
+
+    /// The top three places (everyone tied for a place shares its step), laid out 2nd · 1st · 3rd on a navy stage.
+    private func podium(_ top: [[(p: Player, w: Int, n: Int, score: Double)]]) -> some View {
         HStack(alignment: .bottom, spacing: 10) {
             ForEach([1, 0, 2].filter { $0 < top.count }, id: \.self) { i in
-                PodiumPlace(rank: i + 1, name: top[i].p.name, won: top[i].w, played: top[i].n, score: top[i].score)
+                let group = top[i], records = Set(group.map { "\($0.w)–\($0.n - $0.w)" })
+                PodiumPlace(rank: i + 1, names: group.map(\.p.name), record: records.count == 1 ? records.first : nil, score: group[0].score)
             }
         }
         .padding(.horizontal, 16)
@@ -760,11 +1161,12 @@ struct StandingsSheet: View {
         .listRowInsets(EdgeInsets())
     }
 
-    /// Newest first. Swipe to delete a game entered by mistake; standings update with it.
+    /// Newest first. Tap a game to correct who won, cancel it or delete it; ratings and standings update with it.
     @ViewBuilder private var history: some View {
         if s.results.isEmpty { Text("Finished games show up here.").foregroundStyle(.secondary) }
         ForEach(s.results.indices.reversed(), id: \.self) { i in
             let r = s.results[i]
+            Button { editingGame = i } label: {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text(r.teamA.count == 1 ? "SINGLES" : "DOUBLES")
@@ -780,16 +1182,34 @@ struct StandingsSheet: View {
                     Text("vs").font(.caption).foregroundStyle(.secondary)
                     team(r.teamB, won: r.winner == 1)
                     if r.winner == nil {
-                        Text("No result").font(.caption).foregroundStyle(.secondary)
+                        Text("Cancelled").font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
             .padding(.vertical, 2)
+            .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Edit this game")
+            .confirmationDialog("Game \(i + 1): \(names(r.teamA)) vs \(names(r.teamB))", isPresented: Binding(get: { editingGame == i }, set: { if !$0 { editingGame = nil } }),
+                                titleVisibility: .visible) {
+                // A tournament game's winner moved the bracket on, so only a queue game's result can change.
+                if r.tournamentLabel == nil {
+                    if r.winner != 0 { Button("\(names(r.teamA)) won") { s.setWinner(i, 0) } }
+                    if r.winner != 1 { Button("\(names(r.teamB)) won") { s.setWinner(i, 1) } }
+                    if r.winner != nil { Button("Cancelled (no result)") { s.setWinner(i, nil) } }
+                }
+                Button("Delete Game", role: .destructive) { s.deleteResult(at: i) }
+            } message: {
+                Text("Ratings are corrected to match.")
+            }
             .swipeActions {
                 Button("Delete", systemImage: "trash", role: .destructive) { s.deleteResult(at: i) }
             }
         }
     }
+
+    private func names(_ ids: [UUID]) -> String { ids.map { s.player($0)?.name ?? "Removed player" }.joined(separator: " & ") }
 
     private func team(_ ids: [UUID], won: Bool) -> some View {
         HStack(spacing: 4) {
@@ -820,14 +1240,53 @@ struct StandingsSheet: View {
 struct SkillDots: View {
     let skill: Double
     var tint: Color = .court
+    /// A streak's matching boost (`SessionState.streakBoost`): a win streak colors filled dots vibrant red and fills the next empty dots by the boost;
+    /// a losing streak colors filled dots vibrant blue. Overflowing wins add 🔥; overflowing losses keep blue rings.
+    var boost: Double = 0
+
+    /// Each dot's streak share, plus the overflow marker for wins (fire) or losses (rings).
+    static func streak(filled: Int, boost: Double) -> (parts: [Double], ring: Bool, fire: Bool) {
+        let f = Double(filled), clamp = { (x: Double) in min(1, max(0, x)) }
+        let parts = (1...5).map { i in
+            let d = Double(i)
+            return boost > 0 ? (i > filled ? clamp(f + boost - (d - 1)) : 0) : boost < 0 ? (i <= filled ? clamp(d - (f + boost)) : 0) : 0
+        }
+        return (parts, boost < 0 && -boost > f, boost > 0 && f + boost > 5)
+    }
 
     var body: some View {
+        let filled = Int(skill.rounded()), (parts, ring, fire) = Self.streak(filled: filled, boost: boost)
+        let streakColor = boost > 0 ? Color(red: 1, green: 0.12, blue: 0.30) : Color(red: 0, green: 0.62, blue: 1)
+        let dotColor = boost == 0 ? tint : streakColor
         HStack(spacing: 3) {
             ForEach(1...5, id: \.self) { i in
-                Circle().fill(i <= Int(skill.rounded()) ? tint : tint.opacity(0.2)).frame(width: 7, height: 7)
+                Circle().fill(i <= filled ? dotColor : tint.opacity(0.2))
+                    .overlay {
+                        // Overflowing losses retain blue rings.
+                        if ring && i <= filled { Circle().stroke(streakColor, lineWidth: 1.2).padding(-1.5) }
+                        if parts[i - 1] > 0 {
+                            // win: the leading part, the next level starting to fill; loss: the trailing part, the top taken away
+                            Circle().fill(streakColor)
+                                .mask(alignment: boost > 0 ? .leading : .trailing) { Rectangle().frame(width: 7 * parts[i - 1]) }
+                        }
+                    }
+                    .frame(width: 7, height: 7)
             }
         }
+        .frame(height: 14)
+        .overlay(alignment: .trailing) {
+            if fire {
+                Text("🔥").font(.system(size: 12))
+                    .frame(width: 14, height: 14).offset(x: 17)
+                    .accessibilityHidden(true)
+            }
+        }
+        // Reserve marker space on both sides so the dots stay centered and every rating has the same footprint.
+        .padding(.horizontal, 17)
         .padding(.vertical, 6)
+        .accessibilityElement()
+        .accessibilityLabel(boost > 0 ? "On a win streak" : boost < 0 ? "On a losing streak" : "")
+        .accessibilityHidden(boost == 0)
     }
 }
 
@@ -836,13 +1295,18 @@ struct CourtDrawing: View {
     let format: Format
     let teams: ([Player], [Player])?
     let isPreview: Bool
+    var rallyID: String = "court"
+    var rallySince: Date? = nil // a game in progress: a shuttle rallies between the names
+    var boost: (UUID) -> Double = { _ in 0 } // streaks, shown on the dots
     var onTap: ((Player) -> Void)? = nil // tap a name to replace that player (open courts only)
     var locked: Int? = nil
     var onLock: ((Int) -> Void)? = nil // lock a side so shuffle changes only the other one (open courts only)
 
+    private var courtColor: Color { isPreview ? .court : .playingCourt }
+
     var body: some View {
         ZStack {
-            Rectangle().fill(Color.court)
+            Rectangle().fill(courtColor)
             GeometryReader { g in
                 let w = g.size.width, h = g.size.height, inset = h * 0.08
                 Path { p in
@@ -856,10 +1320,12 @@ struct CourtDrawing: View {
                 .stroke(.white, lineWidth: 3)
             }
             Rectangle().strokeBorder(.white.opacity(0.9), lineWidth: 2)
+            // Under the names, so a landing shuttle never hides one.
+            if let rallySince, teams != nil { RallyShuttle(singles: format == .singles, since: rallySince, courtID: rallyID) }
 
             HStack(spacing: 0) {
-                side(teams?.0).opacity(isPreview ? 0.55 : 1).overlay(alignment: .topLeading) { lockButton(0) }
-                side(teams?.1).opacity(isPreview ? 0.55 : 1).overlay(alignment: .topTrailing) { lockButton(1) }
+                side(teams?.0).overlay(alignment: .topLeading) { lockButton(0) }
+                side(teams?.1).overlay(alignment: .topTrailing) { lockButton(1) }
             }
         }
         .aspectRatio(2.2, contentMode: .fit)
@@ -872,7 +1338,7 @@ struct CourtDrawing: View {
             Button { onLock(side) } label: {
                 Image(systemName: on ? "lock.fill" : "lock.open")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(on ? Color.court : .white)
+                    .foregroundStyle(on ? courtColor : .white)
                     .frame(width: 32, height: 32)
                     .background(Circle().fill(on ? .white : .black.opacity(0.25)))
                     .frame(width: 44, height: 44) // full-size touch target
@@ -890,8 +1356,8 @@ struct CourtDrawing: View {
             if let players {
                 ForEach(players) { p in
                     let label = VStack(spacing: 2) {
-                        Text(p.name).font(.title.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.5)
-                        SkillDots(skill: p.skill, tint: .white).padding(.vertical, -4)
+                        Text(p.name).font((isPreview ? Font.title : .title2).weight(.semibold)).lineLimit(2).multilineTextAlignment(.center)
+                        SkillDots(skill: p.skill, tint: .white, boost: boost(p.id)).padding(.vertical, -4)
                     }
                     if let onTap {
                         Button { onTap(p) } label: { label.padding(.horizontal, 8).contentShape(Rectangle()) }
@@ -912,12 +1378,12 @@ struct CourtDrawing: View {
 }
 
 #Preview {
-    ContentView(s: .constant(SessionState()), past: .constant([]))
+    HomeView(sessions: .constant([SessionState()]))
 }
 
 /// One place on the standings podium: a medal-colored badge with the player's initials, then a step that rises into view.
 struct PodiumPlace: View {
-    let rank: Int, name: String, won: Int, played: Int, score: Double
+    let rank: Int, names: [String], record: String?, score: Double // record: nil when the tied players' records differ
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var risen = false
 
@@ -929,7 +1395,7 @@ struct PodiumPlace: View {
         }
     }
     private var colors: [Color] { Self.medal(rank) }
-    private var initials: String { name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined().uppercased() }
+    private func initials(_ name: String) -> String { name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined().uppercased() }
 
     var body: some View {
         let medal = LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
@@ -939,19 +1405,26 @@ struct PodiumPlace: View {
                 .frame(width: 28, height: 35)
                 .shadow(color: colors[0].opacity(0.8), radius: 6)
                 .opacity(rank == 1 ? 1 : 0)
-            Text(initials)
-                .font(.system(size: rank == 1 ? 26 : 21, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.25), radius: 1, y: 1)
-                .frame(width: rank == 1 ? 70 : 58, height: rank == 1 ? 70 : 58)
-                .background(Circle().fill(medal))
-                .overlay(Circle().strokeBorder(.white.opacity(0.9), lineWidth: 3))
-                .shadow(color: colors[0].opacity(0.6), radius: rank == 1 ? 14 : 8)
-            Text(name)
+            // One badge per player sharing the place (up to three, overlapping); smaller when shared.
+            let size: CGFloat = (rank == 1 ? 70 : 58) * (names.count > 1 ? 0.75 : 1)
+            HStack(spacing: -size * 0.28) {
+                ForEach(Array(names.prefix(3).enumerated()), id: \.offset) { _, n in
+                    Text(initials(n))
+                        .font(.system(size: size * 0.37, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.25), radius: 1, y: 1)
+                        .frame(width: size, height: size)
+                        .background(Circle().fill(medal))
+                        .overlay(Circle().strokeBorder(.white.opacity(0.9), lineWidth: 3))
+                        .shadow(color: colors[0].opacity(0.6), radius: rank == 1 ? 14 : 8)
+                }
+            }
+            Text(names.joined(separator: " · "))
                 .font(.headline).foregroundStyle(.white)
-                .lineLimit(1).minimumScaleFactor(0.6)
+                .multilineTextAlignment(.center)
+                .lineLimit(2).minimumScaleFactor(0.6)
             HStack(spacing: 6) {
-                Text("\(won)–\(played - won)")
+                if let record { Text(record) }
                 Text(score, format: .number.precision(.fractionLength(1)))
                     .padding(.horizontal, 7).padding(.vertical, 1)
                     .background(Capsule().fill(.white.opacity(0.2)))
@@ -980,7 +1453,7 @@ struct PodiumPlace: View {
             withAnimation(.spring(response: 0.55, dampingFraction: 0.72).delay([0, 0.3, 0.15, 0][rank])) { risen = true }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Place \(rank): \(name), \(won) of \(played) won, score \(score.formatted(.number.precision(.fractionLength(1))))")
+        .accessibilityLabel("Place \(rank)\(names.count > 1 ? ", shared" : ""): \(names.formatted()), \(record.map { "\($0), " } ?? "")score \(score.formatted(.number.precision(.fractionLength(1))))")
     }
 }
 
@@ -1012,6 +1485,46 @@ struct ShuttlecockIcon: View {
     }
 }
 
+/// A shuttle rallying between the players' names on a court with a game in progress, seen from above: it rises and grows
+/// mid-flight over its shadow, cork first. Each court's rally starts with its game, so courts aren't in step. Off with Reduce Motion.
+struct RallyShuttle: View {
+    let singles: Bool, since: Date
+    let courtID: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if !reduceMotion {
+            TimelineView(.animation(minimumInterval: 1 / 30)) { tl in
+                Canvas { ctx, size in
+                    let w = size.width, h = size.height, motion = RallyMotion(courtID)
+                    func spot(_ k: Int) -> CGPoint {
+                        CGPoint(x: w * (k % 2 == 0 ? 0.2 + motion.unit(k, 0) * 0.12 : 0.68 + motion.unit(k, 0) * 0.12),
+                                y: h * (singles ? 0.4 + motion.unit(k, 1) * 0.2 : 0.3 + motion.unit(k, 1) * 0.4))
+                    }
+                    let t = max(0, tl.date.timeIntervalSince(since)) / (0.9 + motion.unit(0, 2) * 0.65)
+                    let k = Int(t), f = t - Double(k), a = spot(k), b = spot(k + 1)
+                    let lift = h * (0.12 + motion.unit(k, 3) * 0.12)
+                    let ground = CGPoint(x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f)
+                    let up = sin(.pi * f)
+                    ctx.fill(Path(ellipseIn: CGRect(x: ground.x - 6 + up * 2, y: ground.y - 2, width: 12 - up * 4, height: 4)),
+                             with: .color(.black.opacity(0.25 - up * 0.1)))
+                    guard let shuttle = ctx.resolveSymbol(id: 0) else { return }
+                    // Cork first: point the cork (drawn at the bottom) along the direction of travel on screen.
+                    let angle = atan2((b.y - a.y) - lift * .pi * cos(.pi * f), b.x - a.x) - .pi / 2
+                    ctx.translateBy(x: ground.x, y: ground.y - lift * up)
+                    ctx.rotate(by: .radians(angle))
+                    ctx.scaleBy(x: 1 + up * 0.4, y: 1 + up * 0.4)
+                    ctx.draw(shuttle, at: .zero)
+                } symbols: {
+                    ShuttlecockIcon(colors: [.white, Color(white: 0.8)]).frame(width: 14, height: 18).tag(0)
+                }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+}
+
 /// The podium's stage: an arena at night. Floodlights from the top corners, a net with posts behind the podium, court lines
 /// running in perspective across the floor, a shuttle's dashed flight over the net, and crossed rackets behind the champion.
 struct ArenaBackdrop: View {
@@ -1019,7 +1532,7 @@ struct ArenaBackdrop: View {
         Canvas { ctx, size in
             let w = size.width, h = size.height, horizon = h * 0.56
             ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .linearGradient(
-                Gradient(colors: [Color(red: 0.04, green: 0.13, blue: 0.1), Color(red: 0.08, green: 0.27, blue: 0.19), Color.court]),
+                Gradient(colors: [Color(red: 0.04, green: 0.07, blue: 0.11), Color(red: 0.08, green: 0.18, blue: 0.28), Color.court]),
                 startPoint: .zero, endPoint: CGPoint(x: 0, y: h)))
             // Floodlights
             for x in [0.1, 0.9] {
@@ -1084,9 +1597,10 @@ struct ArenaBackdrop: View {
 
 /// Everyone ever registered in the app, across all sessions, with their latest rating and totals.
 struct AllPlayersSheet: View {
-    let sessions: [SessionState]
+    @Binding var sessions: [SessionState]
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
+    @State private var editing: SessionState.Registered?
 
     var body: some View {
         let all = SessionState.registry(sessions)
@@ -1095,6 +1609,7 @@ struct AllPlayersSheet: View {
             List {
                 if all.isEmpty { Text("No players yet.").foregroundStyle(.secondary) }
                 ForEach(shown) { r in
+                    Button { editing = r } label: {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(r.name).font(.body.weight(.semibold))
@@ -1109,13 +1624,23 @@ struct AllPlayersSheet: View {
                                 .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                         }
                     }
+                    .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                     .accessibilityElement(children: .combine)
+                    .accessibilityHint("Edit name or rating")
                 }
             }
             .searchable(text: $search, prompt: "Search players")
             .navigationTitle("All Players · \(all.count)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .sheet(item: $editing) { r in
+                EditPlayerSheet(player: Player(name: r.name, skill: r.skill), played: r.played, won: r.won,
+                                takenNames: Set(all.map(\.id)).subtracting([r.id]), sessionFields: false) { name, skill, _, _, _ in
+                    SessionState.editEverywhere(name: r.name, to: name, skill: skill, in: &sessions)
+                }.capped()
+            }
         }
     }
 }
@@ -1159,7 +1684,7 @@ struct SessionPlayersSheet: View {
                                     .font(.caption2.weight(.bold))
                                     .foregroundStyle(p.pref == .singles ? Color.singles : p.pref == .doubles ? Color.doubles : .secondary)
                                 VStack(spacing: 1) {
-                                    SkillDots(skill: p.skill).padding(.vertical, -4)
+                                    SkillDots(skill: p.skill, boost: s.streakBoost(p.id)).padding(.vertical, -4)
                                     Text(p.skill, format: .number.precision(.fractionLength(1)))
                                         .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                                 }
@@ -1189,98 +1714,137 @@ struct SessionPlayersSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
-            .sheet(isPresented: $addingNew) { AddPlayerSheet(s: $s) }
-            .sheet(isPresented: $addingReturning) { ReturningPlayersSheet(s: $s, past: past) }
+            .sheet(isPresented: $addingNew) { AddPlayerSheet(s: $s).capped() }
+            .sheet(isPresented: $addingReturning) { ReturningPlayersSheet(s: $s, past: past).capped() }
             .sheet(item: $editing) { p in
                 EditPlayerSheet(player: p, played: s.played(p.id), won: s.wins(p.id),
                                 takenNames: Set(s.players.filter { $0.id != p.id }.map { $0.name.lowercased() })) { name, skill, pref, paused, present in
                     onSave(p, name, skill, pref, paused, present)
-                }
+                }.capped()
             }
         }
     }
 }
 
-/// Partner requests, kept in Options so they don't show on the main screen: each pair is teamed up
-/// about every other game when a fair game allows.
-struct PairingSheet: View {
+/// Locked teammates: pairs who always play doubles together (see SessionState's locked teammates).
+struct LockSheet: View {
     @Binding var s: SessionState
     @Environment(\.dismiss) private var dismiss
     @State private var adding = false
 
-    /// Each two-way request once.
-    private var pairs: [(Player, Player)] {
-        s.players.compactMap { p in
-            guard let q = p.partner.flatMap(s.player), q.partner == p.id, p.id.uuidString < q.id.uuidString else { return nil }
-            return (p, q)
-        }
+    private func status(_ a: Player, _ b: Player) -> String {
+        if let out = [a, b].first(where: { $0.away == true || $0.paused }) { return "On hold: \(out.name) \(out.away == true ? "isn't here" : "is sitting out")" }
+        if s.splitDue(a.id, b.id) { return "3 wins in a row together: not teammates until both play" }
+        let n = s.lockStreak(a.id, b.id)
+        return n > 0 ? "\(n) win\(n == 1 ? "" : "s") in a row together" : "Playing together"
     }
 
     var body: some View {
         NavigationStack {
             List {
-                if !s.pairingActive {
-                    Section {
-                        Label("On hold until there are \(s.pairingMinimum) players for \(s.courts.count) court\(s.courts.count == 1 ? "" : "s"). There \(s.activePlayers == 1 ? "is" : "are") \(s.activePlayers) now, not counting anyone sitting out.",
-                              systemImage: "pause.circle")
-                            .foregroundStyle(.secondary)
-                    }
-                }
                 Section {
-                    if pairs.isEmpty { Text("No pair requests.").foregroundStyle(.secondary) }
+                    let pairs = s.lockedPairs.compactMap { x, y in s.player(x).flatMap { a in s.player(y).map { (a, $0) } } }
+                    if pairs.isEmpty { Text("No locked teammates.").foregroundStyle(.secondary) }
                     ForEach(pairs, id: \.0.id) { a, b in
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("\(a.name) & \(b.name)")
-                                Text(s.pairPlayed(a.id, b.id) ? "Played together" : "Waiting").font(.caption).foregroundStyle(.secondary)
+                                Text("\(status(a, b)) · \(((a.skill + b.skill) / 2).formatted(.number.precision(.fractionLength(1)))) avg").font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Button("Remove", systemImage: "trash", role: .destructive) { s.setPartner(a.id, nil) }
+                            Button("Unlock", systemImage: "trash", role: .destructive) { s.setLock(a.id, nil) }
                                 .labelStyle(.iconOnly)
                                 .buttonStyle(.borderless)
-                                .accessibilityLabel("Remove pair request for \(a.name) and \(b.name)")
+                                .accessibilityLabel("Unlock \(a.name) and \(b.name)")
                         }
                     }
-                    Button("Add Pair Request", systemImage: "plus") { adding = true }
-                        .disabled(!s.pairingActive)
+                    Button("Add Locked Pair", systemImage: "plus") { adding = true }
                 } footer: {
-                    Text("Each pair plays one game together this session, with even teams, one pair at a time. After that they're treated like everyone else. Needs at least twice the players the courts take, minus two.")
+                    Text("Locked teams face opponents averaging up to 0.50 lower or 1.25 higher, using streak-adjusted ratings on both teams. If no suitable match exists, they wait 30 minutes before playing independently. They do not split early for game counts or an idle court. After 3 consecutive wins together, each plays once without the other as teammate. Before a rematch, both exact teams must play another opponent. When both teams are locked, all four players must also complete two other games. Scheduled matches can override locks.")
                 }
             }
-            .navigationTitle("Increase Pairing %")
+            .navigationTitle("Locked Teammates")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .navigationDestination(isPresented: $adding) { AddPairForm(s: $s) }
+            .navigationDestination(isPresented: $adding) { AddLockForm(s: $s) }
         }
     }
 }
 
-/// Picks two players without a request yet.
-struct AddPairForm: View {
+/// Picks two players to lock as teammates.
+struct AddLockForm: View {
     @Binding var s: SessionState
     @Environment(\.dismiss) private var dismiss
     @State private var first: UUID?
     @State private var second: UUID?
 
     var body: some View {
-        let free = s.players.filter { $0.pref != .singles && $0.partner.flatMap(s.player) == nil }
+        let free = s.players.filter { $0.pref != .singles && !s.isLocked($0) }
+        let label = { (p: Player) in "\(p.name) · \(p.skill.formatted(.number.precision(.fractionLength(1))))" }
         Form {
-            Picker("Player", selection: $first) {
-                Text("Choose").tag(UUID?.none)
-                ForEach(free.filter { $0.id != second }) { Text($0.name).tag(Optional($0.id)) }
-            }
-            Picker("Partner", selection: $second) {
-                Text("Choose").tag(UUID?.none)
-                ForEach(free.filter { $0.id != first }) { Text($0.name).tag(Optional($0.id)) }
+            Section {
+                Picker("Player", selection: $first) {
+                    Text("Choose").tag(UUID?.none)
+                    ForEach(free.filter { $0.id != second }) { Text(label($0)).tag(Optional($0.id)) }
+                }
+                Picker("Teammate", selection: $second) {
+                    Text("Choose").tag(UUID?.none)
+                    ForEach(free.filter { $0.id != first }) { Text(label($0)).tag(Optional($0.id)) }
+                }
+            } footer: {
+                if free.count < 2 { Text("Everyone who plays doubles is already locked.") }
             }
         }
-        .navigationTitle("Add Pair Request")
+        .pickerStyle(.navigationLink)
+        .navigationTitle("Add Locked Pair")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Add") { if let first, let second { s.setPartner(first, second) }; dismiss() }
+                Button("Add") { if let first, let second { s.setLock(first, second) }; dismiss() }
                     .disabled(first == nil || second == nil)
             }
+        }
+    }
+}
+
+/// Manual mode: pick each player for a court's next game. The court keeps them (no shuffles) until that game finishes.
+struct ManualLineupSheet: View {
+    @Binding var s: SessionState
+    let courtID: UUID
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let c = s.courts.first { $0.id == courtID }
+        NavigationStack {
+            Form {
+                if let c, let slots = s.manualSlots(c) {
+                    let half = slots.count / 2
+                    let elsewhere = Set(s.courts.filter { $0.id != courtID }.flatMap { s.manualSlots($0)?.compactMap { $0 } ?? [] })
+                    let pool = s.eligible(c.format).filter { !elsewhere.contains($0.id) && !s.scheduledLockedPlayers.contains($0.id) } // waiting, in queue order
+                    ForEach(0..<2, id: \.self) { side in
+                        Section(c.format == .singles ? (side == 0 ? "Player" : "Opponent") : "Team \(side == 0 ? "A" : "B")") {
+                            ForEach(side * half..<(side + 1) * half, id: \.self) { k in
+                                Picker(c.format == .singles ? "Player" : "Player \(k % half + 1)",
+                                       selection: Binding(get: { slots[k] }, set: { s.setSlot(k, to: $0, on: courtID) })) {
+                                    Text("Choose").tag(UUID?.none)
+                                    ForEach(pool.filter { $0.id == slots[k] || !slots.contains($0.id) }) { p in
+                                        Text("\(p.name) · \(s.played(p.id)) played").tag(Optional(p.id))
+                                    }
+                                }
+                                .pickerStyle(.navigationLink) // a full list: easier to scan than a menu with many players at large text
+                            }
+                        }
+                    }
+                    Section {
+                        Button("Back to Automatic", systemImage: "wand.and.stars") { s.setManual(false, on: courtID); dismiss() }
+                    } footer: {
+                        Text("Players waiting, in queue order. \(c.name) won't shuffle these players. It goes back to automatic when the game finishes.")
+                    }
+                }
+            }
+            .navigationTitle("Choose Players · \(c?.name ?? "")")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
     }
 }
@@ -1329,9 +1893,123 @@ struct AddPlayerSheet: View {
 
     private func add() {
         guard !trimmed.isEmpty, !duplicate else { return }
-        s.addPlayer(trimmed, skill: Double(skill))
+        s.addPlayer(trimmed, skill: skillPresets[skill - 1])
         added.append(trimmed)
         name = ""
         focused = true
+    }
+}
+
+extension View {
+    /// Follows the iPad's text size up to the largest standard size. Accessibility sizes overflow the courts in iPad mini portrait.
+    /// Sheets don't inherit it, so every sheet applies it too.
+    func capped() -> some View { dynamicTypeSize(...DynamicTypeSize.xxxLarge) }
+}
+
+struct ScheduledMatchesSheet: View {
+    @Binding var s: SessionState
+    @Environment(\.dismiss) private var dismiss
+    @State private var adding = false
+    @State private var scheduleTick = Date()
+    var body: some View {
+        let _ = scheduleTick
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(s.scheduled ?? []) { r in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("\(s.players(r.teamA).map(\.name).joined(separator: " & ")) vs \(s.players(r.teamB).map(\.name).joined(separator: " & "))").font(.headline)
+                            Text("\(r.format.rawValue.capitalized) · \(s.scheduledStatus(r))").font(.subheadline).foregroundStyle(.secondary)
+                            if !s.scheduledPlaying(r) && !s.scheduledDone(r) {
+                                Button("Postpone 10 min") { s.postponeScheduled(r.id) }
+                                Button("Cancel Request", role: .destructive) { s.cancelScheduled(r.id) }
+                            }
+                        }
+                    }
+                    if (s.scheduled ?? []).isEmpty { Text("No scheduled matches.").foregroundStyle(.secondary) }
+                    Button("Schedule a Match", systemImage: "calendar.badge.plus") { adding = true }.disabled(!s.isLive || s.tournament != nil)
+                } footer: { Text("Each participant must have completed one game. Available participants wait for the others. Exact teams override locks and matching rules. Start is manual. Immediate returners get a temporary two-game queue-priority penalty and need one ordinary game before another scheduled match. An idle court may use held players once per request.") }
+            }
+            .navigationTitle("Scheduled Matches").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .sheet(isPresented: $adding) { ScheduleMatchSheet(s: $s) }
+            .onAppear { s.refreshSchedule() }
+            .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { tick in
+                s.refreshSchedule()
+                if (s.scheduled ?? []).contains(where: { !s.scheduledDone($0) && !s.scheduledPlaying($0) }) { scheduleTick = tick }
+            }
+        }
+    }
+}
+struct ScheduleMatchSheet: View {
+    @Binding var s: SessionState
+    @Environment(\.dismiss) private var dismiss
+    @State private var format: Format = .doubles
+    @State private var slots: [UUID?] = Array(repeating: nil, count: 4)
+    private var hasSessionLength: Bool { s.hours.map { $0.isFinite && $0 > 0 } == true }
+    private var valid: Bool { slots.prefix(format.needed).compactMap { $0 }.count == format.needed && Set(slots.prefix(format.needed).compactMap { $0 }).count == format.needed && hasSessionLength }
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("Format", selection: $format) { ForEach(Format.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) } }
+                } footer: {
+                    if !hasSessionLength { Text("Set the session length in Session Settings before scheduling a match.") }
+                }
+                ForEach(0..<2, id: \.self) { side in
+                    Section(side == 0 ? "Team A" : "Team B") {
+                        ForEach(0..<(format.needed/2), id: \.self) { n in
+                            let k = side * (format.needed/2) + n
+                            Picker("Player \(n+1)", selection: $slots[k]) {
+                                Text("Choose").tag(UUID?.none)
+                                ForEach(s.players.filter { slots[k] == $0.id || !slots.contains($0.id) }) { p in Text(p.name).tag(Optional(p.id)) }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Schedule a Match").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") {
+                    let ids = slots.prefix(format.needed).compactMap { $0 }, half = format.needed/2
+                    if s.scheduleMatch(format, a: Array(ids.prefix(half)), b: Array(ids.suffix(half))) { dismiss() }
+                }.disabled(!valid) }
+            }
+            .onChange(of: format) { slots = Array(repeating: nil, count: 4) }
+        }
+    }
+}
+
+/// A snapshot for the system Save to Files dialog; exporting never edits saved sessions.
+private struct WebExportDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    var data = Data()
+    init(data: Data = Data()) { self.data = data }
+    init(configuration: ReadConfiguration) throws { data = configuration.file.regularFileContents ?? Data() }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
+}
+
+private struct ExportDataButton: View {
+    let sessions: [SessionState]
+    var currentID: UUID?
+    @State private var document = WebExportDocument()
+    @State private var exporting = false
+    @State private var error: String?
+
+    var body: some View {
+        Button("Export for Webapp", systemImage: "square.and.arrow.up") {
+            do {
+                document = WebExportDocument(data: try Store(sessions: sessions).webExportData(currentID: currentID))
+                exporting = true
+            } catch { self.error = error.localizedDescription }
+        }
+        .fileExporter(isPresented: $exporting, document: document, contentType: .json,
+                      defaultFilename: "shuttle-queue-" + Date().ISO8601Format().prefix(10)) { result in
+            if case .failure(let error) = result { self.error = error.localizedDescription }
+        }
+        .alert("Export Failed", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("OK") { error = nil }
+        } message: { Text(error ?? "") }
     }
 }

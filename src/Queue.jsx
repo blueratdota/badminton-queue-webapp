@@ -3,7 +3,7 @@ import { useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Ellipsis, CirclePause, Pause, Play, Pencil, ArrowUpToLine, Trash2, Trophy, UserX } from 'lucide-react';
 import { cn } from 'cn';
-import { scheduledPenalties, getS, queue, played, onCourt, balancedOnly, BALANCED_BELOW, waitStart, startedAt, isLocked, arrive, P, champion, tEntrant, entrantName, sidesIfReady, rrTable } from './engine';
+import { scheduledPenalties, getS, queue, played, onCourt, matchingHelp, waitingMessage, waitStart, startedAt, isLocked, arrive, P, champion, tEntrant, entrantName, sidesIfReady, rrTable } from './engine';
 import { act, openModal, openEdit as edit, confirm } from './store';
 import { cap, plural, row, Dots, Section } from './bits';
 import { Button } from '@/components/ui/button';
@@ -32,7 +32,7 @@ function UpRow({ label, f, p }) {
         <b className="text-[15px] font-semibold [overflow-wrap:anywhere]">{p.a.map(x => x.name).join(' & ')}</b>
         <span className="text-xs font-medium text-muted-foreground">VS</span>
         <b className="text-[15px] font-semibold [overflow-wrap:anywhere]">{p.b.map(x => x.name).join(' & ')}</b>
-      </> : <span className="text-[13px] text-muted-foreground">Waiting for available players</span>}
+      </> : <span className="text-[13px] text-muted-foreground">{waitingMessage()}</span>}
     </div>
   );
 }
@@ -42,8 +42,8 @@ function QueueSection() {
   let n = 0;
   return <>
     <Section head={`Queue · ${q.length} off court · ${onCourt().size} playing`}
-      foot={(balancedOnly() ? `Balanced teams: fewer than ${Math.ceil(BALANCED_BELOW * S.courts.length)} players for ${plural(S.courts.length, 'doubles court')}, so games mix levels with even teams instead of similar-skill groups. ` : '')
-        + 'Fewest counted games first, then longest rested. Balanced recalls may be one game ahead. Repeated groups are allowed; overdue priority is paused.'}>
+      foot={matchingHelp() + ' '
+        + 'Fewest counted games first, then longest rested. Balanced recalls cannot be ahead in counted games. Both exact teams need another opponent before a rematch; overdue priority is paused.'}>
       <AnimatePresence initial={false}>
         {q.map(p => <QueueRow key={p.id} p={p} pos={p.paused ? null : ++n} />)}
       </AnimatePresence>

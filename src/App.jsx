@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarDays, History, Link2, Settings, SquarePlus, Trophy, Upload, Download, UserPlus, Users, UsersRound } from 'lucide-react';
 import { cn } from 'cn';
-import { endSession, endLabel, getS, upNext, nextPairing, withMatching, court, fill, queue } from './engine';
+import { endSession, endLabel, getS, upNext, nextPairing, withMatching, court, fill, queue, matchingMode, matchingHelp, setQueueMatching } from './engine';
 import { useStore, bump, act, openModal, confirm, exportData, importData, theme, setTheme } from './store';
 import { CourtCard } from './Courts';
 import { SidePanel } from './Queue';
@@ -90,6 +90,16 @@ function Toolbar() {
             <DropdownMenuRadioItem value="tournament">Tournament</DropdownMenuRadioItem>
           </DropdownMenuRadioGroup>
           <DropdownMenuSeparator />
+          {!S.tournament && <>
+            <DropdownMenuLabel>Queue matching</DropdownMenuLabel>
+            <DropdownMenuRadioGroup value={matchingMode()} onValueChange={v => act(() => setQueueMatching(v))}>
+              <DropdownMenuRadioItem value="auto">Auto</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="equalSkill">Equal Skill</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="balancedSkill">Balanced Skill</DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+            <p className="max-w-[280px] px-2 py-2 text-xs text-muted-foreground">{matchingHelp()}</p>
+            <DropdownMenuSeparator />
+          </>}
           <DropdownMenuLabel>Appearance</DropdownMenuLabel>
           <DropdownMenuRadioGroup value={theme()} onValueChange={setTheme}>
             {['system', 'light', 'dark'].map(v => <DropdownMenuRadioItem key={v} value={v}>{v[0].toUpperCase() + v.slice(1)}</DropdownMenuRadioItem>)}
