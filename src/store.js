@@ -1,3 +1,4 @@
+import { encodeTransfer, decodeTransfer } from './transfer';
 // The app's state around the engine: which sessions exist and which is open, saving them in this browser,
 // what sheet or confirmation is showing, and the theme. Components re-render through useStore().
 import { useSyncExternalStore } from 'react';
@@ -44,19 +45,17 @@ export function deleteSession(id) {
   } else { getSessions().delete(id); save(); }
 }
 
-/** Everything, as a file to keep as a backup or move to another device. */
-export function exportData() {
-  const blob = new Blob([JSON.stringify({ currentId: getCurrentId(), sessions: [...getSessions().values()] }, null, 1)], { type: 'application/json' });
-  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `shuttle-queue-${new Date().toISOString().slice(0, 10)}.json` });
-  a.click(); URL.revokeObjectURL(a.href);
-}
-/** Adds the sessions in an exported file (or the old artifact's data); a session already here with the same id is replaced. */
+/** A copyable snapshot in the same format used by iPad and the original web app. */
+export function exportData() { return encodeTransfer([...getSessions().values()], getCurrentId()); }
+/** Validate the complete code before changing saved sessions. */
 export function importData(text) {
-  const d = JSON.parse(text);
-  const list = (d?.sessions || []).filter(x => x && x.id && Array.isArray(x.players) && Array.isArray(x.courts) && Array.isArray(x.results));
-  if (!list.length) throw new Error('No sessions found in that file.');
-  for (const x of list) { normalizeEnd(x); getSessions().set(x.id, x); }
-  switchTo(getSessions().has(d.currentId) ? d.currentId : list.sort((a, b) => b.date - a.date)[0].id);
+  const d = decodeTransfer(text), list = d.sessions;
+  for (const x of list) {
+    normalizeEnd(x);
+    for (const id of getSessions().keys()) if(id.toLowerCase() === x.id.toLowerCase()) getSessions().delete(id);
+    getSessions().set(x.id, x);
+  }
+  switchTo(getSessions().has(d.currentId) ? d.currentId : [...list].sort((a,b)=>b.date-a.date)[0].id);
   return list.length;
 }
 

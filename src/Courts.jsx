@@ -4,7 +4,7 @@ import { rallySeed, rallyUnit } from './rally';
 import { motion, AnimatePresence } from 'framer-motion';
 import { UserRound, UsersRound, Ellipsis, Lock, LockOpen, Shuffle, Trash2, Undo2 } from 'lucide-react';
 import { cn } from 'cn';
-import { scheduledOnCourt, postponeScheduled, cancelScheduled, getS, NEED, players, eligible, names, champion, fill, finish, shuffleCourt, lockSide, courtById, streakBoost } from './engine';
+import { waitingMessage, scheduledOnCourt, postponeScheduled, cancelScheduled, getS, NEED, players, eligible, names, champion, fill, finish, shuffleCourt, lockSide, courtById, streak } from './engine';
 import { act, save, openModal, confirm } from './store';
 import { cap, Dots, Seg } from './bits';
 import { Button } from '@/components/ui/button';
@@ -24,7 +24,7 @@ export function CourtCard({ c, next }) {
     <div className={cn('relative z-10 flex min-w-0 flex-col items-center justify-center gap-2 p-2 transition-opacity')}>
       <AnimatePresence mode="popLayout" initial={false}>
         {ps ? ps.map(p => {
-          const body = <><span className="max-w-full text-center [overflow-wrap:anywhere]">{p.name}</span><Dots skill={p.skill} boost={streakBoost(p.id)} className="text-white" /></>;
+          const body = <><span className="max-w-full text-center [overflow-wrap:anywhere]">{p.name}</span><Dots skill={p.skill} streak={streak(p.id)} className="text-white" /></>;
           const cls = 'flex max-w-full flex-col items-center gap-[3px] rounded-lg px-2 py-0.5 font-semibold leading-tight text-[22px]';
           return (
             <motion.div key={p.id} className="max-w-full" initial={{ opacity: 0, scale: 0.85 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.85 }} transition={{ duration: 0.2 }}>
@@ -39,7 +39,7 @@ export function CourtCard({ c, next }) {
   );
 
   const status = next ? `Next up${gameLabel ? ' · ' + gameLabel : ''}${next.note ? ' · ' + next.note : ''}`
-    : t && champion(t) != null ? 'Tournament complete' : !t && short > 0 ? `Need ${short} more for ${format}` : 'Waiting for players';
+    : t && champion(t) != null ? 'Tournament complete' : !t && short > 0 ? `Need ${short} more for ${format}` : waitingMessage(format);
 
   return (
     <motion.article

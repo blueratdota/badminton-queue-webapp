@@ -9,13 +9,13 @@ import {
   deleteResult, past, returningPlayers, registry, queue, setLock, splitDue, rankingMinimum, places,
   tournamentEntrants, buildTournament, withMatching, matchSkill,
 } from './engine';
-import { ui, save, closeModal, openModal, openEdit, confirm, switchTo, newSession, deleteSession } from './store';
+import { ui, save, importData, closeModal, openModal, openEdit, confirm, switchTo, newSession, deleteSession } from './store';
 import { cap, plural, row, btnRow, Dots, Rating, Section, Seg } from './bits';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 
-const SHEETS = { addPlayer: AddPlayer, edit: EditPlayer, replace: ReplacePlayer, results: Results, sessions: Sessions, returning: Returning,
+const SHEETS = { transfer: DataTransfer, addPlayer: AddPlayer, edit: EditPlayer, replace: ReplacePlayer, results: Results, sessions: Sessions, returning: Returning,
   allPlayers: AllPlayers, sessionPlayers: SessionPlayers, scheduled: ScheduledMatches, pairing: Pairing, tsetup: TournamentSetup };
 
 export function Sheets() {
@@ -401,7 +401,7 @@ function Pairing() {
   const pairs = S.players.filter(p => mutual(p) && p.id < p.lock).map(p => [p, P(p.lock)]);
   return (
     <Sheet title="Locked Teammates" left={null} right={{ label: 'Done', run: closeModal }}>
-      <Section foot="Locked teams face streak-adjusted opponents from 0.50 lower through 1.25 higher. Unmatchable pairs wait 30 minutes before playing separately, even if a court is idle. After three wins together, each plays once with a different teammate; they need not face each other. Before a rematch, both exact teams must complete a game against another team. When both teams are locked, each player also needs two other completed games.">
+      <Section foot="Locked teams face saved matching opponents from 0.50 lower through 1.25 higher. Unmatchable pairs wait 30 minutes before playing separately, even if a court is idle. After three wins together, each plays once with a different teammate; they need not face each other. Before a rematch, both exact teams must complete a game against another team. When both teams are locked, each player also needs two other completed games.">
         {pairs.map(([x, y]) => (
           <div key={x.id} className={cn(row, 'flex items-center justify-between gap-3 py-1.5')}>
             <Who name={`${x.name} & ${y.name}`} sub={splitDue(x.id, y.id) ? 'Cooldown · different teammates' : 'Locked together'} />
@@ -477,5 +477,20 @@ function ScheduledMatches() {
       {!S.scheduled?.length&&<div className={cn(row,'text-muted-foreground')}>No scheduled matches.</div>}
       <button className={btnRow} disabled={!!S.tournament||S.ended!=null} onClick={()=>{setSlots(['','','','']);setFormat('doubles');setAdding(true);}}>Schedule a Match</button>
     </Section>
+  </Sheet>;
+}
+
+function DataTransfer({ m }) {
+  const exporting = m.mode === 'export', [text,setText] = useState(m.text || ''), [status,setStatus] = useState('');
+  const fieldRef=useRef(null);
+  const copy=async()=>{try { await navigator.clipboard.writeText(text);setStatus('Code copied. Paste it into Import Data on your other device.'); } catch { fieldRef.current?.focus();fieldRef.current?.select();setStatus('Select and copy the code below.'); }};
+  const paste=async()=>{try { setText(await navigator.clipboard.readText());setStatus(''); } catch { fieldRef.current?.focus();setStatus('Touch and hold the code field, then choose Paste.'); }};
+  const run=()=>{try { const n=importData(text);closeModal();confirm({title:`Imported ${n} session${n===1?'':'s'}`,noCancel:true,actions:[{label:'OK',strong:true,run(){}}]}); } catch(e){setStatus(e.message);} };
+  return <Sheet title={exporting?'Export Data':'Import Data'} left={{label:'Done',run:closeModal}}
+    right={exporting?{label:'Copy Code',run:copy}:{label:'Import',run,disabled:!text.trim()}}>
+    <p className="text-sm text-muted-foreground">{exporting?'Copy the entire code and send it to your other device. Paste it into Import Data there.':'Paste the entire code from Export Data. Sessions with matching IDs are replaced; other sessions are kept.'}</p>
+    {!exporting&&<button className={btnRow} onClick={paste}>Paste Code</button>}
+    <textarea ref={fieldRef} aria-label={exporting?'Data code':'Paste data code'} readOnly={exporting} value={text} onChange={e=>{setText(e.target.value);setStatus('');}} spellCheck={false} autoCapitalize="none" autoCorrect="off" className="min-h-64 w-full resize-y rounded-lg border bg-secondary p-3 font-mono text-xs" />
+    {status&&<p role="status" className="text-sm">{status}</p>}
   </Sheet>;
 }

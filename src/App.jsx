@@ -1,10 +1,10 @@
 // The main screen: toolbar, the courts, and the queue beside them (landscape iPad), below them (portrait iPad),
 // or on their own tab (phones).
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { CalendarDays, History, Link2, Settings, SquarePlus, Trophy, Upload, Download, UserPlus, Users, UsersRound } from 'lucide-react';
 import { cn } from 'cn';
 import { endSession, endLabel, getS, upNext, nextPairing, withMatching, court, fill, queue, matchingMode, matchingHelp, setQueueMatching } from './engine';
-import { useStore, bump, act, openModal, confirm, exportData, importData, theme, setTheme } from './store';
+import { useStore, bump, act, openModal, confirm, exportData, theme, setTheme } from './store';
 import { CourtCard } from './Courts';
 import { SidePanel } from './Queue';
 import { Sheets } from './Sheets';
@@ -62,15 +62,9 @@ export default function App() {
 }
 
 function Toolbar() {
-  const S = getS(), file = useRef(null);
+  const S = getS();
   const tb = 'h-9 w-11 rounded-full text-foreground [&_svg:not([class*=size-])]:size-[22px]';
   const addCourt = () => act(() => { const n = Math.max(0, ...S.courts.map(c => +c.name.replace(/\D/g, '') || 0)) + 1; S.courts.push(court('Court ' + n, 'doubles')); });
-  const onFile = async e => {
-    const f = e.target.files[0]; e.target.value = '';
-    if (!f) return;
-    try { const n = importData(await f.text()); confirm({ title: `Imported ${n} session${n === 1 ? '' : 's'}`, noCancel: true, actions: [{ label: 'OK', strong: true, run() {} }] }); }
-    catch (err) { confirm({ title: "Couldn't import that file", message: err.message, noCancel: true, actions: [{ label: 'OK', strong: true, run() {} }] }); }
-  };
   return (
     <div role="toolbar" aria-label="Session tools" className="flex gap-0.5 rounded-full bg-glass px-1.5 py-1 shadow-[0_1px_4px_rgba(0,0,0,.14)] ring-1 ring-black/5 backdrop-blur-xl max-[700px]:flex-1 max-[700px]:justify-between dark:ring-white/10">
       <DropdownMenu>
@@ -109,11 +103,10 @@ function Toolbar() {
           <DropdownMenuItem onSelect={() => openModal({ type: 'allPlayers' })}><Users />All Players</DropdownMenuItem>
           <DropdownMenuItem onSelect={() => openModal({ type: 'pairing' })}><Link2 />Locked Teammates</DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={exportData}><Download />Export Data</DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => file.current.click()}><Upload />Import Data</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => openModal({type: 'transfer', mode: 'export', text: exportData()})}><Download />Export Data</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => openModal({type: 'transfer', mode: 'import'})}><Upload />Import Data</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-      <input ref={file} type="file" accept="application/json,.json" hidden onChange={onFile} />
       <DropdownMenu>
         <DropdownMenuTrigger asChild><Button variant="ghost" className={tb} disabled={!!S.tournament} aria-label="Add Player" title="Add Player"><UserPlus /></Button></DropdownMenuTrigger>
         <DropdownMenuContent align="start">

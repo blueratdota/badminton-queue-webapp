@@ -19,7 +19,7 @@ Actual app screens using a fictional demo roster. The web app adapts to phones a
 - **Three matching modes:** choose Auto, Equal Skill, or Balanced Skill for each session; copied sessions retain their setting.
 - **Control when you need it:** shuffle a lineup, keep one side, replace a player, select a manual lineup, or lock regular teammates together.
 - **Scheduled matches:** reserve exact teams after their first game, with court assignment, postponement, cancellation, and queue-priority protections.
-- **Ratings and standings:** Elo-style rating changes, temporary win/loss streak adjustments, match history, result corrections, and standings.
+- **Ratings and standings:** Elo-style rating changes, display-only win/loss streak emojis, match history, result corrections, and standings.
 - **Tournament play:** round robin followed by a double-elimination bracket, for singles or doubles.
 - **Session management:** create, end, reopen, and revisit sessions; maintain a player registry across nights.
 - **Local data:** the iPad saves on-device; the hosted web app saves in the current browser and supports JSON export/import.
@@ -32,10 +32,10 @@ Choose **Settings → Queue matching** while in queue mode.
 | Mode | How it selects games |
 | --- | --- |
 | **Auto — default** | Uses the original queue logic: prefer a 1.0-point skill range, then 1.5, then mixed balanced teams, with game-count and rest protections. Older saves default to Auto. |
-| **Equal Skill** | Keeps automatic games within **1.0 matching rating point** from lowest to highest. If a losing-streak penalty leaves a player without a compatible group in the active roster, use their current saved rating instead. A court waits when no legal group fits. |
+| **Equal Skill** | Keeps automatic games within **1.5 saved-rating points below eight active players per doubles court, otherwise 1.0** (singles: 1.0) from lowest to highest. A court waits when no legal group fits. |
 | **Balanced Skill** | Prioritizes queue turns and balances teams, allowing mixed skill levels without preferring a narrow rating range. |
 
-Matching ratings are capped at **5.0**. The losing-streak fallback applies only to Equal Skill; it changes neither saved ratings nor streak history. Game-count, rest, teammate-lock, and rematch protections still apply. Manual lineups and exact scheduled games retain their overrides. Strict matching does not guarantee a maximum wait. See [RULES.md](RULES.md) for the complete behavior and tunable values.
+Matching ratings are capped at **5.0**. Streaks are display-only: 🔥 after three wins, 🧊 after three losses. Matching uses saved ratings capped at 5.0. The locked-pair three-win cooldown remains.
 
 ## Use the app
 
@@ -113,3 +113,9 @@ The checked-in `ShuttleQueue/` sources mirror the native app, whose canonical pr
 ## License
 
 [MIT](LICENSE) © 2026 blueratdota. Third-party dependencies retain their own licenses.
+
+Data transfer uses Settings → Export Data → Copy Code, then Settings → Import Data → Paste Code on the other device. No file is downloaded or selected. Codes use the existing JSON format, including Unicode names and iPad snapshots. Matching sessions are replaced, unrelated sessions are retained, and invalid/incomplete codes are rejected before mutation. The iPad imports from Home → Data.
+
+Equal Skill recall thresholds compare compatible four-player skill windows only. A different skill group cannot block recalls; the minimum-needed exception requires an actual legal skill quartet, not just four rested players. Auto and Balanced Skill retain global recall comparisons.
+
+Equal Skill doubles adapt to active attendance: fewer than eight present, non-sitting-out doubles-eligible players per doubles court use 1.5; eight or more use 1.0. Busy players and courts still count. Singles remain at 1.0. The live range is shown in Settings and enforced in previews and Start; manual/scheduled overrides and ongoing games are preserved.

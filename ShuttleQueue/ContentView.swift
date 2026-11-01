@@ -1,5 +1,5 @@
 import SwiftUI
-import UniformTypeIdentifiers
+import Photos
 
 extension Color {
     static let court = Color(red: 0, green: 0.451, blue: 0.580)
@@ -12,6 +12,8 @@ extension Color {
 struct HomeView: View {
     @Binding var sessions: [SessionState]
     @State private var open: UUID?
+    @State private var exporting = false
+    @State private var importing = false
     @State private var creating = false
     @State private var showAllPlayers = false
     @State private var deleting: SessionState?
@@ -67,7 +69,9 @@ struct HomeView: View {
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Shuttle Queue")
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { ExportDataButton(sessions: sessions) } }
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Menu { Button("Export Data Code", systemImage: "doc.on.doc") { exporting = true }; Button("Import Data Code", systemImage: "doc.on.clipboard") { importing = true } } label: { Label("Data", systemImage: "arrow.up.arrow.down") } } }
+            .sheet(isPresented: $exporting) { ExportCodeSheet(sessions: sessions).capped() }
+            .sheet(isPresented: $importing) { ImportCodeSheet(sessions: $sessions).capped() }
             .navigationDestination(item: $open) { id in
                 ContentView(s: binding(id), others: sessions.filter { $0.id != id },
                             onRename: { old, new in SessionState.editEverywhere(name: old, to: new, in: &sessions, except: id) },
@@ -346,7 +350,7 @@ struct SettingsSheet: View {
                 Section {
                     ExportDataButton(sessions: others + [s], currentID: s.id)
                 } header: { Text("Data") } footer: {
-                    Text("Export all sessions, players and results. Save the file, then choose Import Data in the webapp. Importing replaces sessions with the same ID.")
+                    Text("Copy all sessions, players and results as a data code, then paste it into Import Data on the other device. To import on this iPad, open Data on the home screen. Matching sessions are replaced; other sessions are kept.")
                 }
                 Section { Button("Scheduled Matches", systemImage: "calendar") { showScheduled = true } }
                 Section {
@@ -593,7 +597,7 @@ struct ContentView: View {
             .padding(.horizontal)
 
             // Edge to edge inside the card, so the court gets the full width
-            CourtDrawing(format: format, teams: teams, isPreview: c.match == nil, rallyID: c.id.uuidString, rallySince: c.match?.start, boost: { s.streakBoost($0) },
+            CourtDrawing(format: format, teams: teams, isPreview: c.match == nil, rallyID: c.id.uuidString, rallySince: c.match?.start, streak: { s.streak($0) },
                          onTap: tap,
                          locked: c.locked, onLock: t == nil && next != nil && slots == nil && next?.scheduled == nil ? { side in s.lock(c.locked == side ? nil : side, on: c.id) } : nil)
 
@@ -706,7 +710,7 @@ struct ContentView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(p.name).font(.body.weight(.semibold))
                                     .fixedSize(horizontal: false, vertical: true)
-                                SkillDots(skill: p.skill, boost: s.streakBoost(p.id))
+                                SkillDots(skill: p.skill, streak: s.streak(p.id))
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())
@@ -794,7 +798,7 @@ struct ContentView: View {
                 Text("vs").font(.caption).foregroundStyle(.secondary)
                 Text(names(p.b.map(\.id))).font(.subheadline.weight(.semibold))
             } else {
-                Text(s.waitingMessage).font(.subheadline).foregroundStyle(.secondary)
+                Text(s.waitingMessage(format)).font(.subheadline).foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 2)
@@ -846,7 +850,7 @@ struct ReplacePlayerSheet: View {
     var body: some View {
         let all = s.replacements(for: target.out.id, on: target.courtID)
         // Best fit: keeps the game even and is close to the replaced player's level. Everyone else, closest level first.
-        // Judged on ratings with streak boosts; the rows still show real ratings.
+        // Replacement fit uses saved ratings.
         let format = s.courts.first { $0.id == target.courtID }?.format ?? .doubles
         let gap = { (p: Player) in abs(s.matchSkill(p.id, format: format) - s.matchSkill(target.out.id, format: format)) }
         let best = all.filter { $0.even && gap($0.player) <= 1 }
@@ -900,12 +904,12 @@ struct ReplacePlayerSheet: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(p.name).font(.body.weight(.semibold)).foregroundStyle(.primary)
-                    Text("\(s.played(p.id)) played\(s.streakBoost(p.id) > 0 ? " · on a win streak" : "")\(uneven ? " · makes it uneven" : "")\(from.map { " · next up on \($0)" } ?? "")")
+                    Text("\(s.played(p.id)) played\(s.streak(p.id) >= 3 ? " · on a win streak" : "")\(uneven ? " · makes it uneven" : "")\(from.map { " · next up on \($0)" } ?? "")")
                         .font(.caption).foregroundStyle(from == nil && !uneven ? Color.secondary : Color.singles)
                 }
                 Spacer()
                 VStack(spacing: 1) {
-                    SkillDots(skill: p.skill, boost: s.streakBoost(p.id)).padding(.vertical, -4)
+                    SkillDots(skill: p.skill, streak: s.streak(p.id)).padding(.vertical, -4)
                     Text(p.skill, format: .number.precision(.fractionLength(1)))
                         .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                 }
@@ -1069,11 +1073,20 @@ struct StandingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var tab = "Standings"
     @State private var editingGame: Int? // index into results
+    @State private var screenshot: UIImage?
+    @State private var screenshotError = false
+    @State private var savingPhoto = false
+    @State private var photoMessage: String?
 
     var body: some View {
         NavigationStack {
-            List {
-                if tab == "Standings" { standings } else { history }
+            Group {
+                if tab == "Standings" {
+                    ScrollView { standings().padding(20) }
+                        .background(Color(.systemGroupedBackground))
+                } else {
+                    List { history }
+                }
             }
             .navigationTitle("^[\(s.games.count) game](inflect: true) played")
             .navigationBarTitleDisplayMode(.inline)
@@ -1086,12 +1099,101 @@ struct StandingsSheet: View {
                     .pickerStyle(.segmented)
                     .fixedSize()
                 }
+                ToolbarItem(placement: .topBarLeading) {
+                    if tab == "Standings" {
+                        Button("Generate Screenshot", systemImage: "camera") { generateScreenshot() }
+                            .labelStyle(.iconOnly)
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
         }
+        .sheet(isPresented: Binding(get: { screenshot != nil }, set: { if !$0 { screenshot = nil } })) {
+            if let screenshot {
+                NavigationStack {
+                    ScrollView {
+                        Image(uiImage: screenshot).resizable().scaledToFit()
+                    }
+                    .navigationTitle("Full Standings")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItemGroup(placement: .topBarLeading) {
+                            Button(savingPhoto ? "Saving…" : "Save to Photos") {
+                                Task { await savePhoto(screenshot) }
+                            }
+                            .disabled(savingPhoto)
+                            ShareLink(item: Image(uiImage: screenshot), preview: SharePreview("\(s.title) · Standings", image: Image(uiImage: screenshot))) {
+                                Label("Share", systemImage: "square.and.arrow.up")
+                            }
+                            .labelStyle(.iconOnly)
+                        }
+                        ToolbarItem(placement: .confirmationAction) { Button("Done") { self.screenshot = nil }.disabled(savingPhoto) }
+                    }
+                    .alert("Standings Photo", isPresented: Binding(get: { photoMessage != nil }, set: { if !$0 { photoMessage = nil } })) {
+                        Button("OK", role: .cancel) { photoMessage = nil }
+                    } message: { Text(photoMessage ?? "") }
+                    .interactiveDismissDisabled(savingPhoto)
+                }
+            }
+        }
+        .alert("Couldn't generate screenshot", isPresented: $screenshotError) {
+            Button("OK", role: .cancel) { }
+        } message: { Text("Please try again.") }
     }
 
-    @ViewBuilder private var standings: some View {
+    @MainActor private func savePhoto(_ image: UIImage) async {
+        savingPhoto = true
+        defer { savingPhoto = false }
+        let permission = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard permission == .authorized || permission == .limited else {
+            photoMessage = "Allow adding photos in Settings → ShuttleQueue → Photos, then try again."
+            return
+        }
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAsset(from: image)
+            }
+            photoMessage = "Saved the full standings image to Photos."
+        } catch {
+            photoMessage = "Couldn't save to Photos. Please try again."
+        }
+    }
+
+    @MainActor private func generateScreenshot() {
+        let renderer = ImageRenderer(content:
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Shuttle Queue · \(s.title)").font(.title.bold())
+                Text("Standings · \(s.games.count) games played").font(.headline).foregroundStyle(.secondary)
+                standings(exporting: true)
+            }
+            .padding(24)
+            .frame(width: 820)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(Color(.systemGroupedBackground))
+            .environment(\.colorScheme, .light)
+            .environment(\.dynamicTypeSize, .large)
+        )
+        renderer.scale = 2
+        screenshot = renderer.uiImage
+        screenshotError = screenshot == nil
+        #if DEBUG
+        if let screenshot {
+            assert(screenshot.size.width == 820 && screenshot.size.height > 0, "Full standings image has its requested width and full content height")
+            if ProcessInfo.processInfo.arguments.contains("-standings-export") {
+                let file = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("standings-check.png")
+                do { try screenshot.pngData()?.write(to: file) } catch { assertionFailure("Standings screenshot check: \(error)") }
+            }
+        }
+        #endif
+    }
+
+    private func standings(exporting: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            standingsRows(exporting: exporting)
+        }
+    }
+
+    @ViewBuilder private func standingsRows(exporting: Bool) -> some View {
         let all = s.players
             .map { (p: $0, w: s.wins($0.id), n: s.played($0.id), score: s.score($0.id)) }
             .sorted { ($0.score, $0.w, $1.p.name) > ($1.score, $1.w, $0.p.name) }
@@ -1102,19 +1204,18 @@ struct StandingsSheet: View {
         let places = Self.places(ranked.map(\.score))
         let top = (1...3).map { k in ranked.indices.filter { places[$0] == k && ranked[$0].w > 0 }.map { ranked[$0] } }.prefix { !$0.isEmpty }
         if !top.isEmpty {
-            Section { podium(Array(top)) }.listRowBackground(Color.clear)
+            podium(Array(top), animated: !exporting)
         }
-        Section {
+        if !ranked.isEmpty {
+            Text("Ranked").font(.headline).padding(.top, 8)
             ForEach(Array(ranked.enumerated()), id: \.element.p.id) { i, r in standingRow(r, rank: places[i]) }
-        } header: {
-            if !top.isEmpty { Text("Ranked") }
-        } footer: {
-            Text("Ranked by Score: the win rate, starting everyone at 50 (two extra wins and two extra losses) so one or two lucky games can't top the table. Equal scores share a place. Ranking needs ^[\(minimum) game](inflect: true), three quarters of a typical night here.")
         }
         if !short.isEmpty || !unplayed.isEmpty {
-            Section("Not ranked · played under \(minimum)") {
-                ForEach(short + unplayed, id: \.p.id) { r in standingRow(r, rank: nil) }
-            }
+            Text("Not ranked · played under \(minimum)").font(.headline).padding(.top, 8)
+            Text("These players haven't reached the game requirement: \(Int(SessionState.rankShare * 100))% of the median games played, rounded up — \(minimum) \(minimum == 1 ? "game" : "games") this session.")
+                .font(.subheadline).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(short + unplayed, id: \.p.id) { r in standingRow(r, rank: nil) }
         }
     }
 
@@ -1135,6 +1236,7 @@ struct StandingsSheet: View {
                 .frame(width: 28, height: 28)
                 .background(Circle().fill((rank ?? 4) <= 3 ? PodiumPlace.medal(rank ?? 1)[1] : Color(.tertiarySystemFill)))
             Text(r.p.name).font(.body.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
             Spacer()
             Grid(horizontalSpacing: 18) {
                 GridRow {
@@ -1145,14 +1247,16 @@ struct StandingsSheet: View {
                 }
             }
         }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
     }
 
     /// The top three places (everyone tied for a place shares its step), laid out 2nd · 1st · 3rd on a navy stage.
-    private func podium(_ top: [[(p: Player, w: Int, n: Int, score: Double)]]) -> some View {
+    private func podium(_ top: [[(p: Player, w: Int, n: Int, score: Double)]], animated: Bool) -> some View {
         HStack(alignment: .bottom, spacing: 10) {
             ForEach([1, 0, 2].filter { $0 < top.count }, id: \.self) { i in
                 let group = top[i], records = Set(group.map { "\($0.w)–\($0.n - $0.w)" })
-                PodiumPlace(rank: i + 1, names: group.map(\.p.name), record: records.count == 1 ? records.first : nil, score: group[0].score)
+                PodiumPlace(rank: i + 1, names: group.map(\.p.name), record: records.count == 1 ? records.first : nil, score: group[0].score, animated: animated)
             }
         }
         .padding(.horizontal, 16)
@@ -1240,53 +1344,28 @@ struct StandingsSheet: View {
 struct SkillDots: View {
     let skill: Double
     var tint: Color = .court
-    /// A streak's matching boost (`SessionState.streakBoost`): a win streak colors filled dots vibrant red and fills the next empty dots by the boost;
-    /// a losing streak colors filled dots vibrant blue. Overflowing wins add 🔥; overflowing losses keep blue rings.
-    var boost: Double = 0
+    var streak: Int = 0
 
-    /// Each dot's streak share, plus the overflow marker for wins (fire) or losses (rings).
-    static func streak(filled: Int, boost: Double) -> (parts: [Double], ring: Bool, fire: Bool) {
-        let f = Double(filled), clamp = { (x: Double) in min(1, max(0, x)) }
-        let parts = (1...5).map { i in
-            let d = Double(i)
-            return boost > 0 ? (i > filled ? clamp(f + boost - (d - 1)) : 0) : boost < 0 ? (i <= filled ? clamp(d - (f + boost)) : 0) : 0
-        }
-        return (parts, boost < 0 && -boost > f, boost > 0 && f + boost > 5)
-    }
+    static func marker(_ streak: Int) -> String { streak >= 3 ? "🔥" : streak <= -3 ? "🧊" : "" }
 
     var body: some View {
-        let filled = Int(skill.rounded()), (parts, ring, fire) = Self.streak(filled: filled, boost: boost)
-        let streakColor = boost > 0 ? Color(red: 1, green: 0.12, blue: 0.30) : Color(red: 0, green: 0.62, blue: 1)
-        let dotColor = boost == 0 ? tint : streakColor
+        let filled = min(5, max(1, Int(skill.rounded()))), marker = Self.marker(streak)
         HStack(spacing: 3) {
             ForEach(1...5, id: \.self) { i in
-                Circle().fill(i <= filled ? dotColor : tint.opacity(0.2))
-                    .overlay {
-                        // Overflowing losses retain blue rings.
-                        if ring && i <= filled { Circle().stroke(streakColor, lineWidth: 1.2).padding(-1.5) }
-                        if parts[i - 1] > 0 {
-                            // win: the leading part, the next level starting to fill; loss: the trailing part, the top taken away
-                            Circle().fill(streakColor)
-                                .mask(alignment: boost > 0 ? .leading : .trailing) { Rectangle().frame(width: 7 * parts[i - 1]) }
-                        }
-                    }
-                    .frame(width: 7, height: 7)
+                Circle().fill(i <= filled ? tint : tint.opacity(0.2)).frame(width: 7, height: 7)
             }
         }
         .frame(height: 14)
         .overlay(alignment: .trailing) {
-            if fire {
-                Text("🔥").font(.system(size: 12))
-                    .frame(width: 14, height: 14).offset(x: 17)
-                    .accessibilityHidden(true)
+            if !marker.isEmpty {
+                Text(marker).font(.system(size: 12)).frame(width: 14, height: 14).offset(x: 17).accessibilityHidden(true)
             }
         }
-        // Reserve marker space on both sides so the dots stay centered and every rating has the same footprint.
         .padding(.horizontal, 17)
         .padding(.vertical, 6)
         .accessibilityElement()
-        .accessibilityLabel(boost > 0 ? "On a win streak" : boost < 0 ? "On a losing streak" : "")
-        .accessibilityHidden(boost == 0)
+        .accessibilityLabel(streak >= 3 ? "On a win streak" : "On a losing streak")
+        .accessibilityHidden(marker.isEmpty)
     }
 }
 
@@ -1297,7 +1376,7 @@ struct CourtDrawing: View {
     let isPreview: Bool
     var rallyID: String = "court"
     var rallySince: Date? = nil // a game in progress: a shuttle rallies between the names
-    var boost: (UUID) -> Double = { _ in 0 } // streaks, shown on the dots
+    var streak: (UUID) -> Int = { _ in 0 } // display-only streak markers
     var onTap: ((Player) -> Void)? = nil // tap a name to replace that player (open courts only)
     var locked: Int? = nil
     var onLock: ((Int) -> Void)? = nil // lock a side so shuffle changes only the other one (open courts only)
@@ -1357,7 +1436,7 @@ struct CourtDrawing: View {
                 ForEach(players) { p in
                     let label = VStack(spacing: 2) {
                         Text(p.name).font((isPreview ? Font.title : .title2).weight(.semibold)).lineLimit(2).multilineTextAlignment(.center)
-                        SkillDots(skill: p.skill, tint: .white, boost: boost(p.id)).padding(.vertical, -4)
+                        SkillDots(skill: p.skill, tint: .white, streak: streak(p.id)).padding(.vertical, -4)
                     }
                     if let onTap {
                         Button { onTap(p) } label: { label.padding(.horizontal, 8).contentShape(Rectangle()) }
@@ -1384,6 +1463,7 @@ struct CourtDrawing: View {
 /// One place on the standings podium: a medal-colored badge with the player's initials, then a step that rises into view.
 struct PodiumPlace: View {
     let rank: Int, names: [String], record: String?, score: Double // record: nil when the tied players' records differ
+    var animated = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var risen = false
 
@@ -1443,12 +1523,12 @@ struct PodiumPlace: View {
                     .padding(.top, 14)
             }
             .frame(height: [0, 130, 96, 74][rank])
-            .scaleEffect(x: 1, y: risen ? 1 : 0.02, anchor: .bottom)
+            .scaleEffect(x: 1, y: !animated || risen ? 1 : 0.02, anchor: .bottom)
         }
         .frame(maxWidth: .infinity)
-        .opacity(risen ? 1 : 0)
+        .opacity(!animated || risen ? 1 : 0)
         .onAppear {
-            guard !risen else { return }
+            guard animated, !risen else { return }
             if reduceMotion { risen = true; return }
             withAnimation(.spring(response: 0.55, dampingFraction: 0.72).delay([0, 0.3, 0.15, 0][rank])) { risen = true }
         }
@@ -1684,7 +1764,7 @@ struct SessionPlayersSheet: View {
                                     .font(.caption2.weight(.bold))
                                     .foregroundStyle(p.pref == .singles ? Color.singles : p.pref == .doubles ? Color.doubles : .secondary)
                                 VStack(spacing: 1) {
-                                    SkillDots(skill: p.skill, boost: s.streakBoost(p.id)).padding(.vertical, -4)
+                                    SkillDots(skill: p.skill, streak: s.streak(p.id)).padding(.vertical, -4)
                                     Text(p.skill, format: .number.precision(.fractionLength(1)))
                                         .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                                 }
@@ -1760,7 +1840,7 @@ struct LockSheet: View {
                     }
                     Button("Add Locked Pair", systemImage: "plus") { adding = true }
                 } footer: {
-                    Text("Locked teams face opponents averaging up to 0.50 lower or 1.25 higher, using streak-adjusted ratings on both teams. If no suitable match exists, they wait 30 minutes before playing independently. They do not split early for game counts or an idle court. After 3 consecutive wins together, each plays once without the other as teammate. Before a rematch, both exact teams must play another opponent. When both teams are locked, all four players must also complete two other games. Scheduled matches can override locks.")
+                    Text("Locked teams face opponents averaging up to 0.50 lower or 1.25 higher, using saved matching ratings on both teams. If no suitable match exists, they wait 30 minutes before playing independently. They do not split early for game counts or an idle court. After 3 consecutive wins together, each plays once without the other as teammate. Before a rematch, both exact teams must play another opponent. When both teams are locked, all four players must also complete two other games. Scheduled matches can override locks.")
                 }
             }
             .navigationTitle("Locked Teammates")
@@ -1981,35 +2061,53 @@ struct ScheduleMatchSheet: View {
     }
 }
 
-/// A snapshot for the system Save to Files dialog; exporting never edits saved sessions.
-private struct WebExportDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.json] }
-    var data = Data()
-    init(data: Data = Data()) { self.data = data }
-    init(configuration: ReadConfiguration) throws { data = configuration.file.regularFileContents ?? Data() }
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
-}
-
+/// The same text code works on iPad and web; no file or clipboard read permission is needed.
 private struct ExportDataButton: View {
     let sessions: [SessionState]
     var currentID: UUID?
-    @State private var document = WebExportDocument()
-    @State private var exporting = false
-    @State private var error: String?
-
+    @State private var showing = false
     var body: some View {
-        Button("Export for Webapp", systemImage: "square.and.arrow.up") {
-            do {
-                document = WebExportDocument(data: try Store(sessions: sessions).webExportData(currentID: currentID))
-                exporting = true
-            } catch { self.error = error.localizedDescription }
+        Button("Export Data Code", systemImage: "doc.on.doc") { showing = true }
+            .sheet(isPresented: $showing) { ExportCodeSheet(sessions: sessions, currentID: currentID).capped() }
+    }
+}
+
+private struct ExportCodeSheet: View {
+    let sessions: [SessionState]
+    var currentID: UUID?
+    @Environment(\.dismiss) private var dismiss
+    @State private var code = ""
+    @State private var status = ""
+    var body: some View {
+        NavigationStack {
+            Form {
+                Text("Copy the entire code, send it to your other device, then paste it into Import Data. It includes all sessions, players and results.")
+                TextEditor(text: .constant(code)).font(.system(.caption, design: .monospaced)).frame(minHeight: 240).accessibilityLabel("Data code")
+                Button("Copy Code", systemImage: "doc.on.doc") { UIPasteboard.general.string = code; status = "Code copied." }.disabled(code.isEmpty)
+                if !status.isEmpty { Text(status) }
+            }.navigationTitle("Export Data").toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .task { do { code = try Store(sessions: sessions).exportCode(currentID: currentID) } catch { status = error.localizedDescription } }
         }
-        .fileExporter(isPresented: $exporting, document: document, contentType: .json,
-                      defaultFilename: "shuttle-queue-" + Date().ISO8601Format().prefix(10)) { result in
-            if case .failure(let error) = result { self.error = error.localizedDescription }
+    }
+}
+
+private struct ImportCodeSheet: View {
+    @Binding var sessions: [SessionState]
+    @Environment(\.dismiss) private var dismiss
+    @State private var code = ""
+    @State private var status = ""
+    var body: some View {
+        NavigationStack {
+            Form {
+                Text("Paste the entire code from Export Data. Sessions with matching IDs are replaced; other sessions are kept.")
+                PasteButton(payloadType: String.self) { code = $0.joined(separator: ""); status = "" }
+                TextEditor(text: $code).font(.system(.caption, design: .monospaced)).frame(minHeight: 240).autocorrectionDisabled().textInputAutocapitalization(.never).accessibilityLabel("Paste data code")
+                Button("Import Data") {
+                    do { var store=Store(sessions:sessions);let count=try store.importCode(code);sessions=store.sessions;status="Imported \(count) session\(count == 1 ? "" : "s").";code="" }
+                    catch { status="Couldn’t import this code. Copy the entire code and try again." }
+                }.disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if !status.isEmpty { Text(status).accessibilityAddTraits(.updatesFrequently) }
+            }.navigationTitle("Import Data").toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
-        .alert("Export Failed", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
-            Button("OK") { error = nil }
-        } message: { Text(error ?? "") }
     }
 }
