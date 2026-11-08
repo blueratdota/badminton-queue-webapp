@@ -6,7 +6,7 @@ const originalNow=Date.now; let now=1e12; Date.now=()=>now;
 const t0=now;
 function fixture(n=8) {
   now=t0;
-  const s={id:'schedule-test',date:now-3600000,hours:3,players:Array.from({length:n},(_,i)=>({id:'p'+i,name:'Player '+i,skill:i<2?5:2,pref:'any',readyAt:now+i,paused:false})),courts:[p.court('Court 1','doubles'),p.court('Court 2','doubles')],results:[],tournament:null};
+  const s={id:'schedule-test',date:now-3600000,hours:3,players:Array.from({length:n},(_,i)=>({id:'p'+i,name:'Player '+i,skill:i<2?4.2:2.6,pref:'any',readyAt:now+i,paused:false})),courts:[p.court('Court 1','doubles'),p.court('Court 2','doubles')],results:[],tournament:null};
   p.set('S',s);return s;
 }
 function round(s) {

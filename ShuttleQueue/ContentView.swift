@@ -16,7 +16,14 @@ struct HomeView: View {
     @State private var importing = false
     @State private var creating = false
     @State private var showAllPlayers = false
+    @State private var showHow = false
     @State private var deleting: SessionState?
+
+    private var allPlayersSubtitle: LocalizedStringKey {
+        let reg = SessionState.registry(sessions), checks = reg.filter { $0.check != nil }.count
+        return checks > 0 ? "^[\(reg.count) player](inflect: true) across all sessions · ^[\(checks) level check](inflect: true)"
+                          : "^[\(reg.count) player](inflect: true) across all sessions"
+    }
 
     var body: some View {
         let live = sessions.filter(\.isLive).sorted { $0.date > $1.date }
@@ -34,8 +41,12 @@ struct HomeView: View {
                     Grid(horizontalSpacing: 16, verticalSpacing: 16) {
                         GridRow {
                             tile("Create New Session", "Name, courts, length and players", icon: "plus", tint: .court, prominent: true) { creating = true }
-                            tile("All Players", "^[\(SessionState.registry(sessions).count) player](inflect: true) across all sessions",
+                            tile("All Players", allPlayersSubtitle,
                                  icon: "person.3", tint: .court) { showAllPlayers = true }
+                        }
+                        GridRow {
+                            tile("How the App Works", "The queue, matching and levels", icon: "questionmark", tint: .court) { showHow = true }
+                                .gridCellColumns(2)
                         }
                     }
                     VStack(alignment: .leading, spacing: 12) {
@@ -84,6 +95,7 @@ struct HomeView: View {
             }
             .sheet(isPresented: $creating) { NewSessionSheet(sessions: $sessions) { open = $0 }.capped() }
             .sheet(isPresented: $showAllPlayers) { AllPlayersSheet(sessions: $sessions).capped() }
+            .sheet(isPresented: $showHow) { HowItWorksSheet().capped() }
             .confirmationDialog("Delete \(deleting?.title ?? "this session")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                                 titleVisibility: .visible, presenting: deleting) { d in
                 Button("Delete Session", role: .destructive) { sessions.removeAll { $0.id == d.id } }
@@ -237,8 +249,7 @@ struct NewSessionSheet: View {
                                 Text(p.name).font(.body.weight(.semibold)).foregroundStyle(.primary)
                                 Spacer()
                                 SkillDots(skill: p.skill)
-                                Text(p.skill, format: .number.precision(.fractionLength(1)))
-                                    .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                                LevelLabel(skill: p.skill, alignment: .leading)
                             }
                         }
                         .tint(.primary)
@@ -312,6 +323,7 @@ struct SettingsSheet: View {
     @State private var confirmEndTournament = false
     @State private var showScheduled = false
     @State private var showLocks = false
+    @State private var showHow = false
     @State private var confirmEnd = false
     @State private var confirmDelete = false
 
@@ -365,10 +377,8 @@ struct SettingsSheet: View {
                 }
                 if s.tournament == nil {
                     Section {
-                        Picker("Queue matching", selection: Binding(get: { s.matchingMode }, set: { s.setQueueMatching($0) })) {
-                            ForEach(QueueMatching.allCases, id: \.self) { Text($0.title).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
+                        // ponytail: Equal Skill and Balanced Skill pickers hidden for now; the code paths stay.
+                        Button("How Matching Works", systemImage: "questionmark.circle") { showHow = true }
                     } header: { Text("Queue matching") } footer: { Text(s.matchingHelp) }
                 }
                 Section("Courts") {
@@ -397,6 +407,7 @@ struct SettingsSheet: View {
             .sheet(isPresented: $showTournamentSetup) { TournamentSetup(s: $s).capped() }
             .sheet(isPresented: $showScheduled) { ScheduledMatchesSheet(s: $s).capped() }
             .sheet(isPresented: $showLocks) { LockSheet(s: $s).capped() }
+            .sheet(isPresented: $showHow) { HowItWorksSheet().capped() }
             .confirmationDialog("End the tournament and go back to the queue?", isPresented: $confirmEndTournament, titleVisibility: .visible) {
                 Button("End Tournament", role: .destructive) { s.tournament = nil }
             } message: {
@@ -763,7 +774,7 @@ struct ContentView: View {
             .contentShape(Rectangle())
             .onTapGesture { editing = p }
             .accessibilityAddTraits(.isButton)
-            .accessibilityHint("Edit name or rating")
+            .accessibilityHint("Edit name or level")
             Menu { playerActions(p) } label: {
                 Image(systemName: "ellipsis")
                     .frame(width: 44, height: 44)
@@ -777,7 +788,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder private func playerActions(_ p: Player) -> some View {
-        Button("Edit Name or Rating", systemImage: "pencil") { editing = p }
+        Button("Edit Name or Level", systemImage: "pencil") { editing = p }
         Button(p.paused ? "Back In" : "Sit Out", systemImage: p.paused ? "play" : "pause") {
             s.update(p.id) { $0.paused.toggle() } // the wait clock keeps running while sitting out
         }
@@ -827,7 +838,8 @@ struct ContentView: View {
 
 /// Saves a player edit in one session.
 func savePlayer(_ p: Player, name: String, skill: Double, pref: Preference, paused: Bool, present: Bool, s: inout SessionState) {
-    s.update(p.id) { $0.name = name; $0.skill = skill; $0.pref = pref; $0.paused = paused }
+    s.update(p.id) { if levelOf(skill) != $0.level { $0.levelSet = SessionState.now; $0.levelSnooze = nil } // earlier games don't count towards a level check
+        $0.name = name; $0.skill = skill; $0.pref = pref; $0.paused = paused }
     if present { s.arrive(p.id) } else { s.update(p.id) { $0.away = true } }
 }
 
@@ -910,8 +922,7 @@ struct ReplacePlayerSheet: View {
                 Spacer()
                 VStack(spacing: 1) {
                     SkillDots(skill: p.skill, streak: s.streak(p.id)).padding(.vertical, -4)
-                    Text(p.skill, format: .number.precision(.fractionLength(1)))
-                        .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                    LevelLabel(skill: p.skill)
                 }
             }
         }
@@ -930,11 +941,15 @@ struct EditPlayerSheet: View {
     let played: Int
     let won: Int
     let takenNames: Set<String>
-    var sessionFields = true // false in All Players: name and rating only, applied to every session
+    var sessionFields = true // false in All Players: name and level only, applied to every session
+    var onDelete: (() -> Void)? = nil // All Players: shows Delete Player; the caller confirms
+    var check: SessionState.LevelCheck? = nil // All Players: a suggested level change, with Promote / Move down and Not yet
+    var onLevel: ((Double) -> Void)? = nil
+    var onSnooze: (() -> Void)? = nil
     let onSave: (_ name: String, _ skill: Double, _ pref: Preference, _ paused: Bool, _ present: Bool) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
-    @State private var skill = 3.0
+    @State private var skill = 3.4
     @State private var pref = Preference.any
     @State private var paused = false
     @State private var present = true
@@ -951,29 +966,14 @@ struct EditPlayerSheet: View {
                     if duplicate { Text("Another player\(sessionFields ? " in this session" : "") is already called \(trimmed).").foregroundStyle(.red) }
                 }
                 Section {
-                    HStack {
-                        SkillDots(skill: skill)
-                        Text(skillNames[min(5, max(1, Int(skill.rounded()))) - 1])
-                        Spacer()
-                        Text(skill, format: .number.precision(.fractionLength(1)))
-                            .font(.title3.weight(.bold)).monospacedDigit()
+                    Picker("Level", selection: Binding(get: { levelOf(skill) }, set: { skill = skillPresets[$0 - 1] })) {
+                        ForEach(1...skillNames.count, id: \.self) { Text(skillNames[$0 - 1]).tag($0) }
                     }
-                    Slider(value: $skill, in: 1...5, step: 0.1) {
-                        Text("Rating")
-                    } minimumValueLabel: {
-                        Text("1")
-                    } maximumValueLabel: {
-                        Text("5")
-                    }
-                    Picker("Set level", selection: Binding(get: { min(5, max(1, Int(skill.rounded()))) }, set: { skill = skillPresets[$0 - 1] })) {
-                        ForEach(1...5, id: \.self) { Text("\($0)").tag($0) }
-                    }
-                    .pickerStyle(.segmented)
                 } header: {
-                    Text("Rating")
+                    Text("Level")
                 } footer: {
-                    Text(sessionFields ? "Wins and losses keep adjusting this. \(played) played · \(won) won this session."
-                                       : "Changes their name and rating in every session they're in. \(played) played · \(won) won in all.")
+                    Text(sessionFields ? "Only you change this; results don't. \(played) played · \(won) won this session."
+                                       : "Changes their name and level in every session they're in. \(played) played · \(won) won in all.")
                 }
                 if sessionFields {
                 Section {
@@ -993,13 +993,33 @@ struct EditPlayerSheet: View {
                     Text("Off until they arrive. Turned on, they join the line like a late arrival, with their wait starting then.")
                 }
                 }
+                if let check {
+                    Section {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(check.label).font(.body.weight(.semibold))
+                            Text("Last \(check.games) games: \(check.wins)–\(check.games - check.wins). Expected about \(Int(check.expected.rounded())) wins. Won \(check.higherWins) of \(check.higherGames) against higher levels.")
+                                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                        Button("\(check.up ? "Promote" : "Move down") to \(skillNames[check.to - 1])", systemImage: check.up ? "arrow.up.circle" : "arrow.down.circle") {
+                            dismiss(); onLevel?(skillPresets[check.to - 1])
+                        }
+                        Button("Not yet", systemImage: "clock") { dismiss(); onSnooze?() }
+                    } header: {
+                        Text("Level check")
+                    } footer: {
+                        Text("\(check.up ? "Won clearly more" : "Won clearly less") than their level predicts. “Not yet” asks again after \(SessionState.snoozeGames) more games.")
+                    }
+                }
+                if let onDelete {
+                    Section { Button("Delete Player", systemImage: "trash", role: .destructive) { dismiss(); onDelete() } }
+                }
             }
             .navigationTitle("Edit Player")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { onSave(trimmed, (skill * 10).rounded() / 10, pref, paused, present); dismiss() }
+                    Button("Save") { onSave(trimmed, skillPresets[levelOf(skill) - 1], pref, paused, present); dismiss() }
                         .disabled(trimmed.isEmpty || duplicate)
                 }
             }
@@ -1037,8 +1057,7 @@ struct ReturningPlayersSheet: View {
                             Text(p.name).font(.body.weight(.semibold)).foregroundStyle(.primary)
                             Spacer()
                             SkillDots(skill: p.skill)
-                            Text(p.skill, format: .number.precision(.fractionLength(1)))
-                                .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                            LevelLabel(skill: p.skill, alignment: .leading)
                         }
                     }
                     .accessibilityAddTraits(picked.contains(p.name) ? .isSelected : [])
@@ -1305,7 +1324,7 @@ struct StandingsSheet: View {
                 }
                 Button("Delete Game", role: .destructive) { s.deleteResult(at: i) }
             } message: {
-                Text("Ratings are corrected to match.")
+                Text("Standings are corrected to match.")
             }
             .swipeActions {
                 Button("Delete", systemImage: "trash", role: .destructive) { s.deleteResult(at: i) }
@@ -1341,6 +1360,20 @@ struct StandingsSheet: View {
     }
 }
 
+/// The level name under or beside the dots, always as wide as the longest name so dots and names line up from row to row.
+struct LevelLabel: View {
+    let skill: Double
+    var alignment: Alignment = .center
+
+    var body: some View {
+        ZStack(alignment: alignment) {
+            ForEach(skillNames, id: \.self) { Text($0).hidden() }
+            Text(skillNames[levelOf(skill) - 1])
+        }
+        .font(.caption2).foregroundStyle(.secondary)
+    }
+}
+
 struct SkillDots: View {
     let skill: Double
     var tint: Color = .court
@@ -1349,9 +1382,9 @@ struct SkillDots: View {
     static func marker(_ streak: Int) -> String { streak >= 3 ? "🔥" : streak <= -3 ? "🧊" : "" }
 
     var body: some View {
-        let filled = min(5, max(1, Int(skill.rounded()))), marker = Self.marker(streak)
+        let filled = levelOf(skill), marker = Self.marker(streak)
         HStack(spacing: 3) {
-            ForEach(1...5, id: \.self) { i in
+            ForEach(1...skillNames.count, id: \.self) { i in
                 Circle().fill(i <= filled ? tint : tint.opacity(0.2)).frame(width: 7, height: 7)
             }
         }
@@ -1436,7 +1469,7 @@ struct CourtDrawing: View {
                 ForEach(players) { p in
                     let label = VStack(spacing: 2) {
                         Text(p.name).font((isPreview ? Font.title : .title2).weight(.semibold)).lineLimit(2).multilineTextAlignment(.center)
-                        SkillDots(skill: p.skill, tint: .white, streak: streak(p.id)).padding(.vertical, -4)
+                        Text(skillShortNames[p.level - 1] + SkillDots.marker(streak(p.id))).font(.subheadline.weight(.medium)).foregroundStyle(.white.opacity(0.85))
                     }
                     if let onTap {
                         Button { onTap(p) } label: { label.padding(.horizontal, 8).contentShape(Rectangle()) }
@@ -1681,6 +1714,13 @@ struct AllPlayersSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
     @State private var editing: SessionState.Registered?
+    @State private var deleting: SessionState.Registered?
+    @State private var blocked: String?
+
+    // ponytail: waits for the swipe, menu or edit sheet to finish closing; an alert asked for while one closes never appears.
+    private func askDelete(_ r: SessionState.Registered) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { deleting = r }
+    }
 
     var body: some View {
         let all = SessionState.registry(sessions)
@@ -1698,18 +1738,36 @@ struct AllPlayersSheet: View {
                                 .lineLimit(1).minimumScaleFactor(0.7)
                         }
                         Spacer()
+                        if let check = r.check {
+                            Text(check.label).font(.caption.weight(.bold)).foregroundStyle(check.up ? Color.accentColor : .secondary)
+                                .lineLimit(1)
+                        }
                         VStack(spacing: 1) {
                             SkillDots(skill: r.skill).padding(.vertical, -4)
-                            Text(r.skill, format: .number.precision(.fractionLength(1)))
-                                .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                            LevelLabel(skill: r.skill)
                         }
                     }
                     .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityElement(children: .combine)
-                    .accessibilityHint("Edit name or rating")
+                    .accessibilityHint("Edit name or level")
+                    .swipeActions { Button("Delete", systemImage: "trash", role: .destructive) { askDelete(r) } }
+                    .contextMenu {
+                        Button("Edit Name or Level", systemImage: "pencil") { editing = r }
+                        Button("Delete Player", systemImage: "trash", role: .destructive) { askDelete(r) }
+                    }
                 }
+            }
+            // An alert rather than a confirmation dialog: on iPad, a dialog from a row inside this sheet doesn't appear.
+            .alert("Delete \(deleting?.name ?? "")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), presenting: deleting) { r in
+                Button("Delete", role: .destructive) {
+                    let name = r.name
+                    if !SessionState.deleteEverywhere(name: name, in: &sessions) { DispatchQueue.main.async { blocked = name } }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { r in
+                Text("They're removed from \(r.sessions == 1 ? "the 1 session" : "all \(r.sessions) sessions") they were in and from those standings. Games they played stay in Match History as “Removed player”. This can't be undone.")
             }
             .searchable(text: $search, prompt: "Search players")
             .navigationTitle("All Players · \(all.count)")
@@ -1717,11 +1775,16 @@ struct AllPlayersSheet: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .sheet(item: $editing) { r in
                 EditPlayerSheet(player: Player(name: r.name, skill: r.skill), played: r.played, won: r.won,
-                                takenNames: Set(all.map(\.id)).subtracting([r.id]), sessionFields: false) { name, skill, _, _, _ in
+                                takenNames: Set(all.map(\.id)).subtracting([r.id]), sessionFields: false, onDelete: { askDelete(r) }, check: r.check,
+                                onLevel: { SessionState.editEverywhere(name: r.name, to: r.name, skill: $0, in: &sessions) },
+                                onSnooze: { SessionState.snoozeEverywhere(name: r.name, in: &sessions) }) { name, skill, _, _, _ in
                     SessionState.editEverywhere(name: r.name, to: name, skill: skill, in: &sessions)
                 }.capped()
             }
         }
+        .alert("\(blocked ?? "") is on a court", isPresented: Binding(get: { blocked != nil }, set: { if !$0 { blocked = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text("Finish or undo their game first, then delete them.") }
     }
 }
 
@@ -1765,8 +1828,7 @@ struct SessionPlayersSheet: View {
                                     .foregroundStyle(p.pref == .singles ? Color.singles : p.pref == .doubles ? Color.doubles : .secondary)
                                 VStack(spacing: 1) {
                                     SkillDots(skill: p.skill, streak: s.streak(p.id)).padding(.vertical, -4)
-                                    Text(p.skill, format: .number.precision(.fractionLength(1)))
-                                        .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                                    LevelLabel(skill: p.skill)
                                 }
                             }
                             .contentShape(Rectangle())
@@ -1778,7 +1840,7 @@ struct SessionPlayersSheet: View {
                 } header: {
                     Text("\(all.count) players · \(onCourt.count) playing · \(line.count) waiting · \(sitting) sitting out\(away > 0 ? " · \(away) not here" : "")")
                 } footer: {
-                    Text("Tap a player to edit their name, rating, what they play, sit them out, or mark them present.")
+                    Text("Tap a player to edit their name, level, what they play, sit them out, or mark them present.")
                 }
             }
             .searchable(text: $search, prompt: "Search players")
@@ -1829,7 +1891,7 @@ struct LockSheet: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("\(a.name) & \(b.name)")
-                                Text("\(status(a, b)) · \(((a.skill + b.skill) / 2).formatted(.number.precision(.fractionLength(1)))) avg").font(.caption).foregroundStyle(.secondary)
+                                Text("\(status(a, b)) · \(skillNames[levelOf((a.skill + b.skill) / 2) - 1]) avg").font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
                             Button("Unlock", systemImage: "trash", role: .destructive) { s.setLock(a.id, nil) }
@@ -1840,7 +1902,7 @@ struct LockSheet: View {
                     }
                     Button("Add Locked Pair", systemImage: "plus") { adding = true }
                 } footer: {
-                    Text("Locked teams face opponents averaging up to 0.50 lower or 1.25 higher, using saved matching ratings on both teams. If no suitable match exists, they wait 30 minutes before playing independently. They do not split early for game counts or an idle court. After 3 consecutive wins together, each plays once without the other as teammate. Before a rematch, both exact teams must play another opponent. When both teams are locked, all four players must also complete two other games. Scheduled matches can override locks.")
+                    Text("Locked teams face opponents whose average level is up to about half a level lower or 1½ levels higher. If no suitable match exists, they wait 30 minutes before playing independently. They do not split early for game counts or an idle court. After 3 consecutive wins together, each plays once without the other as teammate. Before a rematch, both exact teams must play another opponent. When both teams are locked, all four players must also complete two other games. Scheduled matches can override locks.")
                 }
             }
             .navigationTitle("Locked Teammates")
@@ -1860,7 +1922,7 @@ struct AddLockForm: View {
 
     var body: some View {
         let free = s.players.filter { $0.pref != .singles && !s.isLocked($0) }
-        let label = { (p: Player) in "\(p.name) · \(p.skill.formatted(.number.precision(.fractionLength(1))))" }
+        let label = { (p: Player) in "\(p.name) · \(p.levelName)" }
         Form {
             Section {
                 Picker("Player", selection: $first) {
@@ -1934,7 +1996,7 @@ struct AddPlayerSheet: View {
     @Binding var s: SessionState
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
-    @State private var skill = 3
+    @State private var skill = 4 // High interm
     @State private var added: [String] = []
     @FocusState private var focused: Bool
 
@@ -1949,8 +2011,8 @@ struct AddPlayerSheet: View {
                         .focused($focused)
                         .submitLabel(.done)
                         .onSubmit(add)
-                    Picker("Skill", selection: $skill) {
-                        ForEach(1...5, id: \.self) { Text(skillNames[$0 - 1]) }
+                    Picker("Level", selection: $skill) {
+                        ForEach(1...skillNames.count, id: \.self) { Text(skillNames[$0 - 1]) }
                     }
                 } footer: {
                     if duplicate { Text("\(trimmed) is already in this session.").foregroundStyle(.red) }
@@ -2109,5 +2171,50 @@ private struct ImportCodeSheet: View {
                 if !status.isEmpty { Text(status).accessibilityAddTraits(.updatesFrequently) }
             }.navigationTitle("Import Data").toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
+    }
+}
+
+/// How the App Works: the queue, matching, and levels, for organisers. RULES.md is the full
+/// spec; keep this and the web version's How the App Works in step with it.
+struct HowItWorksSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    static let queue = [
+        "**Fewest games first.** Whoever has played the fewest counted games is due next; ties go to whoever has rested longest.",
+        "**Rest.** Players just off court sit out the next game when enough rested players are waiting.",
+        "**Late arrivals.** 30+ minutes after the first game, the first 4 late arrivals go to the front of the line, at most 2 in one game.",
+        "**Cancelled games** don't count for anyone, and the four go back to where they were in line.",
+    ]
+    static let matching = [
+        "Tries four players at the **same or neighbouring levels**, then up to **2 levels** apart.",
+        "**Never more than 2 levels apart:** if no such four are free, the court waits. Singles opponents are also within 2 levels.",
+        "Rest and fair game counts come before a close skill match.",
+    ]
+    static let allModes = [
+        "Teams aim for averages within about one level; if that's impossible, the fairest split.",
+        "The exact same teams don't face each other twice in a row.",
+        "Locked teammates stay together, within the 2-level limit. Choose Players and Scheduled Matches override the automatic picks.",
+    ]
+    static let ratings = [
+        "Seven levels: **Low beginner, High beginner, Low interm, High interm, Low adv, High adv, Pro**.",
+        "You set each player's level. Wins and losses never change it.",
+        "🔥 3+ wins in a row and 🧊 3+ losses in a row are display only; they never change matching.",
+        "**Standings** use the win rate with 2 extra wins and 2 extra losses, so a lucky night can't top the table. You need 75% of the night's typical games to be ranked.",
+    ]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("The queue") { lines(Self.queue) }
+                Section("Matching") { lines(Self.matching + Self.allModes) }
+                Section("Levels and standings") { lines(Self.ratings) }
+            }
+            .navigationTitle("How the App Works")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+
+    private func lines(_ items: [String]) -> some View {
+        ForEach(items, id: \.self) { Text((try? AttributedString(markdown: $0)) ?? AttributedString($0)) }
     }
 }

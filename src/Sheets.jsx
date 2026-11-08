@@ -5,18 +5,17 @@ import { motion } from 'framer-motion';
 import { Circle, CircleCheck, History, Plus, Trash2, Trophy, UserPlus, Users, CirclePause } from 'lucide-react';
 import { cn } from 'cn';
 import {
-  postponeScheduled, scheduleMatch, scheduledStatus, scheduledDone, scheduledPlaying, cancelScheduled, endLabel, getS, SKILL, PREFS, P, level, r1, avg, names, played, wins, score, isDupName, addPlayer, arrive, replacements, replace, courtById, clone,
+  postponeScheduled, scheduleMatch, scheduledStatus, scheduledDone, scheduledPlaying, cancelScheduled, endLabel, getS, PRESETS, SKILL, editEverywhere, deleteEverywhere, snoozeEverywhere, levelCheckLabel, PREFS, P, level, avg, names, played, wins, score, isDupName, addPlayer, arrive, replacements, replace, courtById, clone,
   deleteResult, past, returningPlayers, registry, queue, setLock, splitDue, rankingMinimum, places,
   tournamentEntrants, buildTournament, withMatching, matchSkill,
 } from './engine';
 import { ui, save, importData, closeModal, openModal, openEdit, confirm, switchTo, newSession, deleteSession } from './store';
 import { cap, plural, row, btnRow, Dots, Rating, Section, Seg } from './bits';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
-import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 
 const SHEETS = { transfer: DataTransfer, addPlayer: AddPlayer, edit: EditPlayer, replace: ReplacePlayer, results: Results, sessions: Sessions, returning: Returning,
-  allPlayers: AllPlayers, sessionPlayers: SessionPlayers, scheduled: ScheduledMatches, pairing: Pairing, tsetup: TournamentSetup };
+  allPlayers: AllPlayers, sessionPlayers: SessionPlayers, scheduled: ScheduledMatches, pairing: Pairing, tsetup: TournamentSetup, howItWorks: HowItWorks, playerLevel: PlayerLevel };
 
 export function Sheets() {
   const m = ui.modal, Sheet = m && SHEETS[m.type];
@@ -60,7 +59,7 @@ const Who = ({ name, sub, subClass }) => (
 
 /** Adds people as they arrive. The sheet stays open so several can be added in a row. */
 function AddPlayer() {
-  const [name, setName] = useState(''), [skill, setSkill] = useState(3), [added, setAdded] = useState([]);
+  const [name, setName] = useState(''), [skill, setSkill] = useState(3.4), [added, setAdded] = useState([]);
   const input = useRef(null);
   const nm = name.trim(), dup = isDupName(nm);
   const add = () => { if (!nm || dup) return; addPlayer(nm, skill); save(); setAdded(a => [...a, nm]); setName(''); input.current?.focus(); };
@@ -70,8 +69,8 @@ function AddPlayer() {
         <Section foot={dup && <span className="text-destructive">{nm} is already in this session.</span>}>
           <div className={row}><input ref={input} type="text" className={field} placeholder="Player name" autoComplete="off" maxLength={40} aria-label="Player name" value={name} onChange={e => setName(e.target.value)} /></div>
           <label className={cn(row, 'flex items-center justify-between gap-3')}>
-            <span>Skill</span>
-            <select className={select} value={skill} onChange={e => setSkill(+e.target.value)}>{SKILL.map((s, i) => <option key={s} value={i + 1}>{s}</option>)}</select>
+            <span>Level</span>
+            <select className={select} value={skill} onChange={e => setSkill(+e.target.value)}>{SKILL.map((s, i) => <option key={s} value={PRESETS[i]}>{s}</option>)}</select>
           </label>
         </Section>
       </form>
@@ -91,7 +90,8 @@ function EditPlayer({ m }) {
   const saveEdit = () => {
     if (!nm || dup) return;
     const old = p.name.toLowerCase();
-    p.name = nm; p.skill = Math.round(skill * 10) / 10; p.pref = pref; p.paused = paused;
+    if (level(skill) !== level(p.skill)) { p.levelSet = Date.now(); delete p.levelSnooze; }
+    p.name = nm; p.skill = PRESETS[level(skill) - 1]; p.pref = pref; p.paused = paused;
     if (present) arrive(p.id); else p.away = true;
     if (old !== nm.toLowerCase()) for (const x of past()) for (const q of x.players) if (q.name.toLowerCase() === old) q.name = nm;
     save(); closeModal();
@@ -101,17 +101,10 @@ function EditPlayer({ m }) {
       <Section foot={dup && <span className="text-destructive">Another player in this session is already called {nm}.</span>}>
         <div className={row}><input type="text" className={cn(field, 'text-xl font-semibold')} value={name} maxLength={40} aria-label="Name" onChange={e => setName(e.target.value)} /></div>
       </Section>
-      <Section head="Rating" foot={`Wins and losses keep adjusting this. ${played(p.id)} played · ${wins(p.id)} won this session.`}>
-        <div className={cn(row, 'flex items-center justify-between gap-3')}>
-          <span className="flex items-center gap-2"><Dots skill={skill} />{SKILL[level(skill) - 1]}</span>
-          <span className="text-xl font-bold tabular-nums">{r1(skill)}</span>
-        </div>
-        <div className={cn(row, 'flex items-center gap-3')}>
-          <span className="text-muted-foreground">1</span>
-          <Slider min={1} max={5} step={0.1} value={[skill]} onValueChange={([v]) => setSkill(v)} aria-label="Rating" className="flex-1 py-3" />
-          <span className="text-muted-foreground">5</span>
-        </div>
-        <div className={row}><Seg label="Set level" value={String(level(skill))} onChange={n => setSkill(+n)} options={[1, 2, 3, 4, 5].map(n => ({ value: String(n), label: n }))} /></div>
+      <Section head="Level" foot="Only the organiser changes levels. Wins and losses never change them.">
+        <label className={cn(row, 'flex items-center justify-between gap-3')}><span>Level</span>
+          <select className={select} value={PRESETS[level(skill)-1]} onChange={e => setSkill(+e.target.value)}>{SKILL.map((n,i)=><option key={n} value={PRESETS[i]}>{n}</option>)}</select>
+        </label>
       </Section>
       <Section head="Plays" foot="Sitting out keeps their place in line; their wait clock keeps running.">
         <div className={row}><Seg label="Plays" value={pref} onChange={setPref} options={PREFS.map(v => ({ value: v, label: cap(v) }))} /></div>
@@ -257,7 +250,7 @@ function MatchHistory() {
   if (!S.results.length) return <Section><div className={cn(row, 'text-muted-foreground')}>Finished games show up here.</div></Section>;
   const team = (ids, won) => <span className={won ? 'font-bold' : 'text-muted-foreground'}>{won && <Trophy className="mr-1 inline size-4 fill-current text-singles" />}{names(ids)}</span>;
   return (
-    <Section foot="Deleting a game entered by mistake also undoes its rating change.">
+    <Section foot="Deleting or correcting a game updates records and streaks. Player levels stay fixed.">
       {S.results.map((r, i) => ({ r, i })).reverse().map(({ r, i }) => { const f = r.a.length === 1 ? 'singles' : 'doubles';
         return (
           <div key={i} className={cn(row, 'grid gap-1.5')}>
@@ -315,7 +308,7 @@ function Returning() {
             return (
               <button key={p.name} className={btnRow} aria-pressed={on} onClick={() => setPicked(on ? picked.filter(x => x !== p.name) : [...picked, p.name])}>
                 {on ? <CircleCheck className="size-6 fill-ink text-card" /> : <Circle className="size-6 text-faint" />}
-                <b className="flex-1 truncate font-semibold">{p.name}</b><Dots skill={p.skill} /><small className="text-[11px] tabular-nums text-muted-foreground">{r1(p.skill)}</small>
+                <b className="flex-1 truncate font-semibold">{p.name}</b><Dots skill={p.skill} /><small className="text-[11px] tabular-nums text-muted-foreground">{SKILL[level(p.skill)-1]}</small>
               </button>
             ); })}
         {all.length > 0 && !shown.length && <div className={cn(row, 'text-muted-foreground')}>No matches.</div>}
@@ -332,10 +325,10 @@ function AllPlayers() {
       <Search value={search} onChange={setSearch} />
       <Section>
         {shown.map(r => (
-          <div key={r.name} className={cn(row, 'flex items-center justify-between gap-3')}>
-            <Who name={r.name} sub={`${plural(r.sessions, 'session')} · ${r.played} played · ${r.won} won · last ${new Date(r.last).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`} />
+          <button type="button" onClick={() => openModal({type:"playerLevel",name:r.name})} key={r.name} className={cn(row, 'flex w-full items-center justify-between gap-3 text-left')}>
+            <Who name={r.name} subClass={r.check ? "text-ink" : undefined} sub={r.check ? levelCheckLabel(r.check) : `${plural(r.sessions, 'session')} · ${r.played} played · ${r.won} won`} />
             <Rating p={r} />
-          </div>
+          </button>
         ))}
         {!shown.length && <div className={cn(row, 'text-muted-foreground')}>{all.length ? 'No matches.' : 'No players yet.'}</div>}
       </Section>
@@ -361,7 +354,7 @@ function SessionPlayers() {
       )}
       <Search value={search} onChange={setSearch} />
       <Section head={`${all.length} players · ${Object.keys(on).length} playing · ${line.length} waiting · ${sitting} sitting out${away ? ` · ${away} not here` : ''}`}
-        foot="Tap a player to edit their name, rating, what they play, sit them out, or mark them present.">
+        foot="Tap a player to edit their name, level, what they play, sit them out, or mark them present.">
         {shown.map(p => {
           const status = on[p.id] ? `On ${on[p.id]}` : p.away ? 'Not here' : p.paused ? 'Sitting out' : line.includes(p.id) ? `Waiting · #${line.indexOf(p.id) + 1}` : 'Waiting';
           return (
@@ -401,7 +394,7 @@ function Pairing() {
   const pairs = S.players.filter(p => mutual(p) && p.id < p.lock).map(p => [p, P(p.lock)]);
   return (
     <Sheet title="Locked Teammates" left={null} right={{ label: 'Done', run: closeModal }}>
-      <Section foot="Locked teams face saved matching opponents from 0.50 lower through 1.25 higher. Unmatchable pairs wait 30 minutes before playing separately, even if a court is idle. After three wins together, each plays once with a different teammate; they need not face each other. Before a rematch, both exact teams must complete a game against another team. When both teams are locked, each player also needs two other completed games.">
+      <Section foot="Locked teams face opponents whose total levels are one lower through three higher, within the two-level range. Unmatchable pairs wait 30 minutes before playing separately, even if a court is idle. After three wins together, each plays once with a different teammate; they need not face each other. Before a rematch, both exact teams must complete a game against another team. When both teams are locked, each player also needs two other completed games.">
         {pairs.map(([x, y]) => (
           <div key={x.id} className={cn(row, 'flex items-center justify-between gap-3 py-1.5')}>
             <Who name={`${x.name} & ${y.name}`} sub={splitDue(x.id, y.id) ? 'Cooldown · different teammates' : 'Locked together'} />
@@ -494,3 +487,53 @@ function DataTransfer({ m }) {
     {status&&<p role="status" className="text-sm">{status}</p>}
   </Sheet>;
 }
+
+function PlayerLevel({m}) {
+  const r=registry().find(p=>p.name.toLowerCase()===m.name.toLowerCase());
+  const [skill,setSkill]=useState(r?.skill ?? 3.4), [name,setName]=useState(m.name);
+  if(!r)return null;
+  const apply=(v)=>{editEverywhere(r.name,name.trim(),v);save();closeModal();};
+  const c=r.check;
+  const askDelete=()=>confirm({title:'Delete '+r.name+' from all sessions?',message:'Games stay in history. This cannot be undone.',actions:[{label:'Delete Player',danger:true,run:()=>{
+    const changed=deleteEverywhere(r.name);
+    if(changed){save();closeModal();}
+    else confirm({title:'Player is on court',message:'Finish their game before deleting them.',actions:[{label:'OK',run(){}}]});
+  }}]});
+  const valid=name.trim() && !registry().some(p=>p.name.toLowerCase()!==r.name.toLowerCase() && p.name.toLowerCase()===name.trim().toLowerCase());
+  return <Sheet title="Player Level" right={{label:'Save',disabled:!valid,run:()=>apply(skill)}}>
+    <Section head="All sessions" foot="Changes apply to this player in every session.">
+      <div className={row}><input aria-label="Player name" className={field} value={name} onChange={e=>setName(e.target.value)} /></div>
+      <label className={cn(row,'flex justify-between gap-3')}>Level<select className={select} value={PRESETS[level(skill)-1]} onChange={e=>setSkill(+e.target.value)}>{SKILL.map((n,i)=><option key={n} value={PRESETS[i]}>{n}</option>)}</select></label>
+    </Section>
+    {c&&<Section head={levelCheckLabel(c)} foot="Suggestions only; you decide whether to change the level.">
+      <p className={row}>Last {c.games} games: {c.wins} wins, {c.games-c.wins} losses. Expected about {Math.round(c.expected)} wins. Won {c.higherWins} of {c.higherGames} against higher levels.</p>
+      <button disabled={!valid} className={btnRow} onClick={()=>apply(PRESETS[c.to-1])}>{c.dir==='up'?'Promote':'Move down'} to {SKILL[c.to-1]}</button>
+      <button className={btnRow} onClick={()=>{snoozeEverywhere(r.name);save();closeModal();}}>Not yet</button>
+    </Section>}
+    <Section><button className={cn(btnRow,'text-destructive')} onClick={askDelete}>Delete Player</button></Section>
+  </Sheet>;
+}
+function HowItWorks() {
+  return <Sheet title="How the App Works" left={null} right={{label:'Done',run:closeModal}}>
+    {Object.entries(HOW).map(([title,items])=><Section key={title} head={title==='queue'?'The queue':title==='ratings'?'Player levels':title==='matching'?'Auto matching':title==='allModes'?'Every game':title}>
+      {items.map((text,i)=><p key={i} className={row}>{text.split(/(\*\*.*?\*\*)/g).map((part,j)=>part.startsWith('**')?<b key={j}>{part.slice(2,-2)}</b>:part)}</p>)}
+    </Section>)}
+  </Sheet>;
+}
+
+const HOW = {
+  queue: ['**Fewest games first.** Whoever has played the fewest counted games is due next; ties go to whoever has rested longest.',
+    '**Rest.** Players just off court sit out the next game when enough rested players are waiting.',
+    '**Late arrivals.** 30+ minutes after the first game, the first 4 late arrivals go to the front of the line, at most 2 in one game.',
+    "**Cancelled games** don't count for anyone, and the four go back to where they were in line."],
+  matching: ['Tries four players at the **same or neighbouring levels**, then up to **2 levels** apart.',
+    '**Never more than 2 levels apart:** if no such four are free, the court waits. Singles opponents are also within 2 levels.',
+    'Rest and fair game counts come before a close skill match.'],
+  allModes: ["Teams aim for averages within about one level; if that's impossible, the fairest split.",
+    "The exact same teams don't face each other twice in a row.",
+    'Locked teammates stay together, within the 2-level limit. Choose Players and Scheduled Matches override the automatic picks.'],
+  ratings: ['Seven levels: **Low beginner, High beginner, Low interm, High interm, Low adv, High adv, Pro**.',
+    "You set each player's level. Wins and losses never change it.",
+    '🔥 3+ wins in a row and 🧊 3+ losses in a row are display only; they never change matching.',
+    "**Standings** use the win rate with 2 extra wins and 2 extra losses, so a lucky night can't top the table. You need 75% of the night's typical games to be ranked."],
+};

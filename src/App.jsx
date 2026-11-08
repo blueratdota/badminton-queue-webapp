@@ -85,13 +85,9 @@ function Toolbar() {
           </DropdownMenuRadioGroup>
           <DropdownMenuSeparator />
           {!S.tournament && <>
-            <DropdownMenuLabel>Queue matching</DropdownMenuLabel>
-            <DropdownMenuRadioGroup value={matchingMode()} onValueChange={v => act(() => setQueueMatching(v))}>
-              <DropdownMenuRadioItem value="auto">Auto</DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="equalSkill">Equal Skill</DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="balancedSkill">Balanced Skill</DropdownMenuRadioItem>
-            </DropdownMenuRadioGroup>
+            <DropdownMenuLabel>Auto matching</DropdownMenuLabel>
             <p className="max-w-[280px] px-2 py-2 text-xs text-muted-foreground">{matchingHelp()}</p>
+            <DropdownMenuItem onSelect={() => openModal({type:'howItWorks'})}>How the App Works</DropdownMenuItem>
             <DropdownMenuSeparator />
           </>}
           <DropdownMenuLabel>Appearance</DropdownMenuLabel>

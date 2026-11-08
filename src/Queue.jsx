@@ -86,7 +86,7 @@ function QueueRow({ p, pos }) {
           transition={{ duration: 0.25 }} className={cn(row, 'hold flex items-center gap-2.5 bg-card', p.paused && 'opacity-50')}>
           {/* The click that ends a long press would also open the editor; swallow it. */}
           <button className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 text-left" onClick={() => { if (menuOpened.current) { menuOpened.current = false; return; } edit(p); }}
-            aria-label={`${p.name}, ${pos ? 'number ' + pos : 'sitting out'}. Edit name or rating. Press and hold for more.`}>
+            aria-label={`${p.name}, ${pos ? 'number ' + pos : 'sitting out'}. Edit name or level. Press and hold for more.`}>
             <span className="flex min-w-7 justify-end font-semibold tabular-nums text-muted-foreground">{pos ?? <CirclePause className="size-5" />}</span>
             <span className="grid min-w-0">
               <b className="font-semibold [overflow-wrap:anywhere]">{p.name}</b>

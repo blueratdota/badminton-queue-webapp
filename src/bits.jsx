@@ -1,6 +1,6 @@
 // Small pieces shared by every screen: skill dots, inset-grouped list sections, the segmented control, confirmations.
 import { cn } from 'cn';
-import { level, r1, SKILL, streakEmoji, streak } from './engine';
+import { level, SKILL, streakEmoji, streak } from './engine';
 import { ui, closeConfirm } from './store';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { AlertDialog, AlertDialogContent, AlertDialogTitle, AlertDialogDescription } from '@/components/ui/alert-dialog';
@@ -15,7 +15,7 @@ export function Dots({ skill, streak: count = 0, className }) {
   const marker = streakEmoji(count);
   return <span role={marker ? 'img' : undefined} aria-label={marker ? `On a ${count > 0 ? 'win' : 'losing'} streak` : undefined}
     aria-hidden={!marker || undefined} className={cn('rating-dots text-ink', className)}>
-    {[1, 2, 3, 4, 5].map(i => <i key={i} className={cn(i <= level(skill) && 'on')} />)}
+    {SKILL.map((_, j) => j + 1).map(i => <i key={i} className={cn(i <= level(skill) && 'on')} />)}
     {marker && <span className="streak-marker" aria-hidden="true">{marker}</span>}
   </span>;
 }
@@ -24,8 +24,8 @@ export function Dots({ skill, streak: count = 0, className }) {
 export function Rating({ p, onClick, label }) {
   const Comp = onClick ? 'button' : 'span';
   return (
-    <Comp onClick={onClick} className="flex flex-none flex-col items-center gap-0.5" aria-label={label ?? `Skill ${SKILL[level(p.skill) - 1]}, rating ${r1(p.skill)}`}>
-      <Dots skill={p.skill} streak={p.id ? streak(p.id) : 0} /><small className="text-[11px] tabular-nums text-muted-foreground">{r1(p.skill)}</small>
+    <Comp onClick={onClick} className="flex flex-none flex-col items-center gap-0.5" aria-label={label ?? SKILL[level(p.skill) - 1]}>
+      <Dots skill={p.skill} streak={p.id ? streak(p.id) : 0} /><small className="text-[11px] tabular-nums text-muted-foreground">{SKILL[level(p.skill) - 1]}</small>
     </Comp>
   );
 }

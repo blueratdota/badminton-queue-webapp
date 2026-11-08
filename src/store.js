@@ -2,7 +2,7 @@ import { encodeTransfer, decodeTransfer } from './transfer';
 // The app's state around the engine: which sessions exist and which is open, saving them in this browser,
 // what sheet or confirmation is showing, and the theme. Components re-render through useStore().
 import { useSyncExternalStore } from 'react';
-import { refreshSchedule, normalizeEnd, LS_KEY, THEME_KEY, blankSession, nextSession, past, getS, setS, getSessions, setSessions, getCurrentId, setCurrentId } from './engine';
+import { PRESETS, level, refreshSchedule, normalizeEnd, LS_KEY, THEME_KEY, blankSession, nextSession, past, getS, setS, getSessions, setSessions, getCurrentId, setCurrentId } from './engine';
 
 // ---------- re-rendering ----------
 let version = 0;
@@ -52,6 +52,8 @@ export function importData(text) {
   const d = decodeTransfer(text), list = d.sessions;
   for (const x of list) {
     normalizeEnd(x);
+    if (!x.ended) delete x.queueMatching;
+    for (const p of x.players) p.skill = PRESETS[level(p.skill) - 1];
     for (const id of getSessions().keys()) if(id.toLowerCase() === x.id.toLowerCase()) getSessions().delete(id);
     getSessions().set(x.id, x);
   }
@@ -63,7 +65,7 @@ export function importData(text) {
 function load() {
   try { const d = JSON.parse(localStorage.getItem(LS_KEY)); if (d?.sessions?.length) { setSessions(new Map(d.sessions.map(x => [x.id, x]))); setCurrentId(d.currentId); } } catch {}
   if (!getSessions().has(getCurrentId())) { const x = getSessions().size ? [...getSessions().values()].sort((a, b) => b.date - a.date)[0] : blankSession(); getSessions().set(x.id, x); setCurrentId(x.id); persist(); }
-  for (const x of getSessions().values()) normalizeEnd(x);
+  for (const x of getSessions().values()) { normalizeEnd(x); if (!x.ended) delete x.queueMatching; for (const p of x.players) p.skill = PRESETS[level(p.skill) - 1]; }
   setS(getSessions().get(getCurrentId()));
   refreshSchedule(); persist();
 }
