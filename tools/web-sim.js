@@ -18,6 +18,7 @@ if (process.argv.includes('--parity')) { // one night with nothing random; same 
     players: (src0.current || src0).players.map((p, n) => ({ id: 'p' + n, name: p.name, skill: p.skill, rated: p.rated, pref: p.pref || 'any', paused: false, readyAt: t0 + n })),
     courts: Array.from({ length: courts }, (_, i) => page.court('Court ' + (i + 1), 'doubles')) };
   S.queueMatching=opt('queue-matching',(src0.current||src0).queueMatching||'auto');
+  if (process.argv.includes('--wide')) S.wide = true; // 3 levels to avoid repeats
   page.set('S', S);
   const byName = Object.fromEntries(S.players.map(p => [p.name, p.id])), truth = Object.fromEntries(S.players.map(p => [p.id, p.skill]));
   for (const [x, y] of pairs) page.setPartner(byName[x], byName[y]);

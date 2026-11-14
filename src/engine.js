@@ -12,7 +12,13 @@ export const FAIR = 0.75;   // doubles teams' averages within 0.75 of a level co
 export const SIMILAR = 1.0; // doubles "similar skill": all four within 1 level
 export const WIDER = 1.6;   // 2 levels: tried when every similar group would repeat recent partners or opponents, or call someone straight back
 export const MAX_SPREAD = 1.6; // ponytail: Auto never builds a game more than 2 levels wide (doubles or singles); the court waits instead
-export const REPEAT_LIMIT = 1; // ponytail: any partnership repeated from the last 3 games, even after the best balanced shuffle
+export // "3 levels to avoid repeats" (S.wide): a doubles game may be 3 levels wide, with exactly even teams, when every game within 2 levels
+// would repeat a foursome or a recent partnership (or none can be made). ponytail: one retry of the whole pick, not a search stage.
+const WIDE_SPREAD = 2.4;
+let wideOn = false; // scoped to the wide retry of one automatic pick, like lockCtx
+const evenTeams = sk => { const t=[...sk].sort((a,b)=>b-a); return Math.min(Math.abs(t[0]+t[3]-t[1]-t[2]),Math.abs(t[0]+t[2]-t[1]-t[3]),Math.abs(t[0]+t[1]-t[2]-t[3]))<1e-9; };
+const levelsAllowed = (sk, on=wideOn) => { const r=Math.max(...sk)-Math.min(...sk); return r<=MAX_SPREAD+1e-9 || on&&sk.length===4&&r<=WIDE_SPREAD+1e-9&&evenTeams(sk); };
+const REPEAT_LIMIT = 1; // ponytail: any partnership repeated from the last 3 games, even after the best balanced shuffle
 // Nobody should wait longer than 30 minutes. Anyone who has waited 20 (a court still has to free up) plays in the next game,
 // which may stretch to OVERDUE_SPREAD levels with balanced teams at worst. ponytail: 20 chosen by simulation, like the iPad app.
 export const WAIT_PRIORITY = 20 * 60000;
@@ -258,7 +264,7 @@ export function recallLimit(line,games,justOff) {
     first, then fewest repeats, then (bySpread) nearest ratings, then whoever has waited longest. Splits come back least repetitive first.
  */
 // ponytail: searches up to 12 candidates (165 groups), like the iPad app
-export function bestFour(q, pool, recent, justOff, { bySpread = false, must = 1, games = {}, heavyFirst = false, allowed }) {
+export function bestFour(q, pool, recent, justOff, { bySpread = false, must = 1, games = {}, heavyFirst = false, fours = new Set(), allowed }) {
   if (pool.length < 3) return null;
   let best = null;
   const lk = lockCtx ? lockCtx.locks.filter(l => q.some(p => p.id === l.x) && q.some(p => p.id === l.y)) : [];
@@ -274,7 +280,7 @@ export function bestFour(q, pool, recent, justOff, { bySpread = false, must = 1,
     if(four.some(p=>justOff.has(p.id)&&(games[p.id]||0)>limits[p.id])) continue;
     const splits=fair.map((sp,o)=>({sp,o,r:repeats(sp.a,sp.b,recent)})).sort((x,y)=>x.r-y.r||Math.abs(sum(x.sp.a)-sum(x.sp.b))-Math.abs(sum(y.sp.a)-sum(y.sp.b))||x.o-y.o);
     const sk=four.map(p=>p.skill),range=Math.max(...sk)-Math.min(...sk),rep=splits[0].r;
-    const key=[four.filter(p=>justOff.has(p.id)).length,...(bySpread?[Math.round(range*4)]:[]),picked.reduce((a,i)=>a+(games[q[i].id]||0),0),rep,...(bySpread?[Math.round(range*100)]:[]),pool[k],picked.reduce((a,b)=>a+b,0)];
+    const key=[four.filter(p=>justOff.has(p.id)).length,...(bySpread?[Math.round(range*4)]:[]),picked.reduce((a,i)=>a+(games[q[i].id]||0),0),rep,...(bySpread?[Math.round(range*100)]:[]),fours.size?Math.round(Math.abs(sum(splits[0].sp.a)-sum(splits[0].sp.b))*100):0,fours.has(four.map(p=>p.id).sort().join(','))?1:0,pool[k],picked.reduce((a,b)=>a+b,0)];
     if (!best || cmp(key, best.key) < 0) best = { key, pen: rep, splits: splits.map(x => x.sp) };
   }
   return best && { splits: best.splits, penalty: best.pen, justOff: best.key[0] };
@@ -283,7 +289,7 @@ export function bestFour(q, pool, recent, justOff, { bySpread = false, must = 1,
     that repeat recent partners and opponents least. If that would call someone straight back on court or repeat too much, a wider
     range, then balanced teams from the nearest ratings. `choice` is the shuffle count, cycling through that group's fair splits. */
 /** `accept`: an extra test every four must pass. */
-export function pickDoubles(q, choice = 0, { recent = {}, must = 1, justOff = new Set(), accept = () => true, capSpread = null, games = {}, balancedOnly = false, searchLimit = 12 } = {}) {
+export function pickDoubles(q, choice = 0, { recent = {}, must = 1, justOff = new Set(), accept = () => true, capSpread = null, games = {}, balancedOnly = false, searchLimit = 12, fours = new Set() } = {}) {
   if (q.length < 4) return null;
   const head = q[0];
   // How far a pick falls short: players straight off court first (rest beats skill match), then repeats past the limit.
@@ -293,7 +299,7 @@ export function pickDoubles(q, choice = 0, { recent = {}, must = 1, justOff = ne
   const similarGroup = spread => {
     const near = [...new Set([...Array.from({ length: must - 1 }, (_, i) => i + 1),
       ...q.map((_, i) => i).slice(1).filter(i => Math.abs(q[i].skill - head.skill) <= spread + 1e-9).slice(0, searchLimit)])].sort((a, b) => a - b);
-    return bestFour(q, near, recent, justOff, { must, games, allowed: four => { const s = four.map(p => p.skill); const t = fairSplits(four)[0]; return Math.max(...s) - Math.min(...s) <= spread + 1e-9 && Math.abs(sum(t.a) - sum(t.b)) / 2 <= FAIR + 1e-9 && accept(four); } });
+    return bestFour(q, near, recent, justOff, { must, games, fours, allowed: four => { const s = four.map(p => p.skill); const t = fairSplits(four)[0]; return Math.max(...s) - Math.min(...s) <= spread + 1e-9 && Math.abs(sum(t.a) - sum(t.b)) / 2 <= FAIR + 1e-9 && accept(four); } });
   };
   // balancedOnly (too few players for similar groups): straight to even teams, in queue order, no rating-range preference.
   let best = balancedOnly ? null : similarGroup(matchingRange()), note = null;
@@ -303,7 +309,7 @@ export function pickDoubles(q, choice = 0, { recent = {}, must = 1, justOff = ne
   }
   if (!fine(best)) {
     // Balanced teams from the nearest ratings; an overdue game (capSpread) stays within that many levels unless nothing else is free.
-    const balanced = cap => bestFour(q, q.map((_, i) => i).slice(1, searchLimit), recent, justOff, { bySpread: !balancedOnly, heavyFirst: balancedOnly, must, games,
+    const balanced = cap => bestFour(q, q.map((_, i) => i).slice(1, searchLimit), recent, justOff, { bySpread: !balancedOnly, heavyFirst: balancedOnly, must, games, fours,
       allowed: four => { const t = fairSplits(four)[0], sk = four.map(p => p.skill);
         return Math.abs(sum(t.a) - sum(t.b)) / 2 <= FAIR && accept(four) && (cap == null || Math.max(...sk) - Math.min(...sk) <= cap + 1e-9); } });
     const b = balanced(capSpread) || (!best && capSpread != null ? balanced(null) : null);
@@ -354,8 +360,8 @@ export const lastOffCourt = () => { const r = counted().at(-1); return new Set(r
 export const activePlayers = () => S.players.filter(p => !p.paused && !p.away).length; // sitting out and not here don't count
 /** All courts doubles and fewer than 6.25 players per court here: balanced teams instead of similar-skill groups. */
 export const matchingMode = () => S.queueMatching || 'auto';
-export const matchingHelp = () => ({auto:'Similar levels first: same or neighbouring level, then 2 levels apart. Never wider than 2 levels; the court waits instead.',equalSkill:`Doubles players rated 4.0 and up play only each other; everyone under 4.0 plays balanced games among themselves. If either group has fewer than 4 active doubles players, everyone plays balanced games together. ${splitTiers()?'Groups are split now.':'Groups are together now (one has fewer than 4 players).'} Singles stay within 1.0. Matching uses saved ratings; streaks are display-only.`,balancedSkill:'Players due next play with balanced teams, allowing mixed skill levels.'})[matchingMode()];
-export const waitingMessage = (format='doubles') => matchingMode()==='auto' ? 'Waiting for players within 2 levels of each other' : matchingMode()==='equalSkill' ? (format==='doubles' ? 'Waiting for 4 players from the same group (4.0+ or under 4.0)' : `Waiting for a legal group within ${matchingRange(format).toFixed(1)} rating points`) : 'Waiting for available players';
+export const matchingHelp = () => ({auto:'Similar levels first: same or neighbouring level, then 2 levels apart. '+(S.wide?'3 levels apart only with exactly even teams, when every closer game would repeat a foursome or recent partners.':'Never wider than 2 levels; the court waits instead.'),equalSkill:`Doubles players rated 4.0 and up play only each other; everyone under 4.0 plays balanced games among themselves. If either group has fewer than 4 active doubles players, everyone plays balanced games together. ${splitTiers()?'Groups are split now.':'Groups are together now (one has fewer than 4 players).'} Singles stay within 1.0. Matching uses saved ratings; streaks are display-only.`,balancedSkill:'Players due next play with balanced teams, allowing mixed skill levels.'})[matchingMode()];
+export const waitingMessage = (format='doubles') => matchingMode()==='auto' ? `Waiting for players within ${S.wide?3:2} levels of each other` : matchingMode()==='equalSkill' ? (format==='doubles' ? 'Waiting for 4 players from the same group (4.0+ or under 4.0)' : `Waiting for a legal group within ${matchingRange(format).toFixed(1)} rating points`) : 'Waiting for available players';
 export const IDEAL_PER_DOUBLES_COURT = 8;
 export function matchingRange(format='doubles') {
   if(matchingMode()!=='equalSkill'||format!=='doubles')return SIMILAR;
@@ -375,7 +381,7 @@ export function splitTiers() {
 /** Explicit mixed-skill mode, or Equal Skill with one group too small to split. */
 export const balancedOnly = () => matchingMode() === 'balancedSkill' || matchingMode() === 'equalSkill' && !splitTiers();
 export function skillRangeAllowed(ids) {
-  if(matchingMode()==='auto'){const s=ids.map(id=>matchSkill(id,ids.length===2?'singles':'doubles'));return Math.max(...s)-Math.min(...s)<=MAX_SPREAD+1e-9;}
+  if(matchingMode()==='auto'){const s=ids.map(id=>matchSkill(id,ids.length===2?'singles':'doubles'));return levelsAllowed(s,!!S.wide);}
   if(matchingMode()!=='equalSkill')return true;
   if(ids.length!==2)return !splitTiers()||new Set(ids.map(id=>matchSkill(id)>=TOP_TIER)).size<=1;
   const skills=ids.map(id=>matchSkill(id,'singles'));
@@ -389,8 +395,9 @@ export function setQueueMatching(mode) {
     c.locked=null;c.shuffles=0;
   }
 }
-export function rotateTeams(p,choice=0){
-  const all=fairSplits([...p.a,...p.b]).filter(t=>rematchAllowed(t.a.map(x=>x.id),t.b.map(x=>x.id)) && Math.abs(sum(t.a)-sum(t.b))/2<=FAIR+1e-9 && (!lockCtx||keepsLocks(t.a.map(x=>x.id),t.b.map(x=>x.id),lockCtx.locks,true,lockCtx.protection)));
+export const isWide = p => { const sk=[...p.a,...p.b].map(x=>x.skill); return Math.max(...sk)-Math.min(...sk)>MAX_SPREAD+1e-9; };
+function rotateTeams(p,choice=0){
+  const all=fairSplits([...p.a,...p.b]).filter(t=>rematchAllowed(t.a.map(x=>x.id),t.b.map(x=>x.id)) && Math.abs(sum(t.a)-sum(t.b))/2<=FAIR+1e-9 && (!isWide(t)||Math.abs(sum(t.a)-sum(t.b))<1e-9) && (!lockCtx||keepsLocks(t.a.map(x=>x.id),t.b.map(x=>x.id),lockCtx.locks,true,lockCtx.protection)));
   const history=counted();
   const last=team=>{let n=-1;history.forEach((g,i)=>{if([g.a,g.b].some(t=>team.every(x=>t.includes(x.id))))n=i;});return n;};
   all.sort((a,b)=>Math.max(last(a.a),last(a.b))-Math.max(last(b.a),last(b.b)) || Math.abs(sum(a.a)-sum(a.b))-Math.abs(sum(b.a)-sum(b.b)));
@@ -433,7 +440,8 @@ export function rematchAllowed(a,b,history=matchupHistory||lastTeamOpponents()) 
   const x=teamKey(a),y=teamKey(b);return history.get(x)!==y && history.get(y)!==x;
 }
 export function automaticMatchupAllowed(a,b) {
-  if(!rematchAllowed(a,b)){const line=eligible('doubles');if(line.length>REMATCH_FALLBACK_PLAYERS||!pick('doubles',line)?.rematchFallback)return false;}
+  // Above the small-group size only the balanced-rematch fallback applies, and only for these four.
+  if(!rematchAllowed(a,b)){const line=eligible('doubles'),p=pick('doubles',line);if(!p?.rematchFallback||line.length>REMATCH_FALLBACK_PLAYERS&&[...p.a,...p.b].map(x=>x.id).sort().join()!==[...a,...b].sort().join())return false;}
   const locked=[a,b].every(t=>t.length===2&&P(t[0])?.lock===t[1]&&P(t[1])?.lock===t[0]);
   return !locked||!lockedRematchBlocked(a,b);
 }
@@ -496,11 +504,28 @@ export const LOCK_WAIT=30*60000, LOCK_LOWER=0.5, LOCK_HIGHER=1.25;
 export function pick(f, line, choice = 0, allowIdleRelease = false) {
   const old=matchupHistory;matchupHistory=lastTeamOpponents();
   try {
-    const normal=pickAvailable(f,line,choice);if(normal)return normal;
+    let normal=pickAvailable(f,line,choice);
+    const full=f==='doubles'&&line.length===eligible(f).length,history=matchupHistory;
+    const lopsided=p=>p.a.length===2&&Math.abs(sum(p.a)-sum(p.b))/2>FAIR+1e-9;
+    // 3 levels to avoid repeats: when the game within 2 levels is missing, lopsided or a repeat, look again up to 3 levels with even teams.
+    if(f==='doubles'&&S.wide&&matchingMode()==='auto'){
+      const repeating=p=>{const k=[...p.a,...p.b].map(x=>x.id).sort().join();return counted().some(r=>r.a.length===2&&[...r.a,...r.b].sort().join()===k)||repeats(p.a,p.b,recentPairs())>0;};
+      const poor=!normal||lopsided(normal);
+      if(poor||repeating(normal)){
+        wideOn=true;let w;try{w=pickAvailable(f,line,choice);}finally{wideOn=false;}
+        if(w&&isWide(w)&&Math.abs(sum(w.a)-sum(w.b))<1e-9&&(poor||!repeating(w))){w.note=[w.note,'3 levels apart, even teams'].filter(Boolean).join(' · ');normal=w;}
+      }
+    }
+    // An even rematch beats lopsided teams: when the cooldown leaves only an unbalanced game, retry without it.
+    if(normal&&!(full&&lopsided(normal)))return normal;
     // A small waiting group can exhaust its exact-team opponents; retain all other protections.
-    if(f!=='doubles'||line.length>REMATCH_FALLBACK_PLAYERS||line.length!==eligible(f).length)return null;
+    if(!full||!normal&&line.length>REMATCH_FALLBACK_PLAYERS)return null;
     matchupHistory=new Map();
     const p=pickAvailable(f,line,choice);
+    if(normal){ // keep the lopsided game unless the retry is balanced, and only call it a repeat if it is one
+      if(!p||lopsided(p))return normal;
+      if(rematchAllowed(p.a.map(x=>x.id),p.b.map(x=>x.id),history))return p;
+    }
     if(p){p.rematchFallback=true;p.note=[p.note,'teams repeated to keep the court playing'].filter(Boolean).join(' · ');}
     return p;
   } finally {matchupHistory=old;}
@@ -590,13 +615,15 @@ export function pickCoreHead(f, line, choice = 0) {
   const split = f === 'doubles' && splitTiers();
   if (split && pool.length) { const top = pool[0].skill >= TOP_TIER; pool = pool.filter(p => (p.skill >= TOP_TIER) === top); }
   const turn = fresh ? 0 : choice, off = lastOffCourt();
+  const catchUp = f === 'doubles' && matchingMode()==='auto' && pool.some(p=>(n[p.id]||0)>(n[pool[0]?.id]||0)&&Math.abs(p.skill-pool[0].skill)<=MAX_SPREAD+1e-9);
+  const fours = new Set(counted().filter(r=>r.a.length===2&&r.b.length===2).map(r=>[...r.a,...r.b].sort().join(',')));
   const opts = f === 'doubles' ? { recent: recentPairs(), must: Math.max(1, overdue.length), justOff: off,
-    capSpread: overdue.length ? OVERDUE_SPREAD : null, games: n, balancedOnly: balancedOnly() || split && (pool[0]?.skill ?? TOP_TIER) < TOP_TIER } : null; // an overdue game may stretch to 2 levels, balanced, at worst
+    capSpread: overdue.length ? OVERDUE_SPREAD : null, games: n, fours, balancedOnly: catchUp || balancedOnly() || split && (pool[0]?.skill ?? TOP_TIER) < TOP_TIER } : null; // an overdue game may stretch to 2 levels, balanced, at worst
   // At most 2 late arrivals on their first game in one game, so a wave of arrivals doesn't take over a court.
   const newIds = new Set(line.filter(newcomer).map(p => p.id));
   let limitNew=!!opts&&newIds.size>LATE_PER_GAME,evenGames=!!opts;
   const capped=matchingMode()==='auto';
-  const fewNew=four=>(!capped||Math.max(...four.map(p=>p.skill))-Math.min(...four.map(p=>p.skill))<=MAX_SPREAD+1e-9)&&(!limitNew||four.filter(p=>newIds.has(p.id)).length<=LATE_PER_GAME);
+  const fewNew=four=>(!capped||levelsAllowed(four.map(p=>p.skill)))&&(!limitNew||four.filter(p=>newIds.has(p.id)).length<=LATE_PER_GAME);
   // Even games: nobody plays while someone with fewer games is left waiting (a late arrival counts at par), so similar-skill
   // groups don't leave anyone 2 games behind.
   const even = four => { const ids = new Set(four.map(p => p.id)), rest = pool.filter(p => !ids.has(p.id));
@@ -604,7 +631,7 @@ export function pickCoreHead(f, line, choice = 0) {
   if (opts) {
     opts.accept = four => fewNew(four) && (!evenGames || even(four));
     // Search the whole waiting line while mixing arrivals, so a wave cannot hide the regulars.
-    opts.searchLimit=limitNew?pool.length:12;
+    opts.searchLimit=limitNew||catchUp?pool.length:12;
   }
   const singlesCap=matchingMode()==='equalSkill'?RANGE:matchingMode()==='auto'?MAX_SPREAD:null;
   const singlesPool=singlesCap!=null?pool.filter(p=>Math.abs(p.skill-pool[0].skill)<=singlesCap+1e-9):pool;
@@ -613,7 +640,7 @@ export function pickCoreHead(f, line, choice = 0) {
     evenGames=false;p=pickDoubles(pool,turn,opts)||p;
   }
   if ((!p || Math.abs(sum(p.a)-sum(p.b))/2>FAIR) && limitNew) {
-    limitNew=false;opts.searchLimit=12;p=pickDoubles(pool,turn,opts)||p;
+    limitNew=false;opts.searchLimit=catchUp?pool.length:12;p=pickDoubles(pool,turn,opts)||p;
   }
   if(p && f==='doubles')p=rotateTeams(p,turn);
   if (p && fresh) p.options = 99; // keeps the shuffle button available
@@ -1063,7 +1090,7 @@ export function nextSession(keepPlayers) {
     // marked present as they arrive; locked teammates carry over
     players: keepPlayers ? S.players.map((p, n) => ({ id: ids.get(p.id), name: p.name, skill: p.skill, pref: 'any', paused: false, readyAt: now + n, away: true,
       lock: (p.lock && ids.get(p.lock)) || null, rated: p.rated != null ? p.rated + played(p.id) : null })) : [],
-    courts: S.courts.map(c => court(c.name, c.format)), queueMatching:S.queueMatching,
+    courts: S.courts.map(c => court(c.name, c.format)), queueMatching:S.queueMatching, ...(S.wide?{wide:true}:{}),
   };
 }
 /** The latest version of everyone in these sessions (by name, ignoring case), with their rated games carried forward. */
@@ -1278,6 +1305,41 @@ export function selfCheck() {
   S.results = [res(s0, s1), res(s0, s1), res(s0, s1)];
   S.results.push(res(s0, s1, null));
   console.assert(streak(s0) === 3, "a cancelled game doesn't break a streak");
+  // A player one game behind searches beyond the usual candidate window before giving others another turn.
+  { const keep=S;
+    S={players:[4.2,...Array(11).fill(4.2),3.4,3.4,3.4].map(pl),courts:[court('C1','doubles')],results:[],tournament:null};
+    for(const p of S.players.slice(1,12))S.results.push({a:[p.id],b:['ghost'],winner:0,start:0,end:1});
+    const game=pick('doubles',S.players), wanted=[S.players[0],...S.players.slice(12)].map(p=>p.id).sort().join();
+    console.assert(game&&[...game.a,...game.b].map(p=>p.id).sort().join()===wanted,'a behind player searches the whole compatible queue before relaxing equal game counts');
+    const five=Array.from({length:5},(_,i)=>pl(3.4,i)),oldFour=five.slice(0,4).map(p=>p.id).sort().join();
+    const fresh=pickDoubles(five,0,{fours:new Set([oldFour])});
+    console.assert(fresh&&[...fresh.a,...fresh.b].map(p=>p.id).sort().join()!==oldFour&&[...fresh.a,...fresh.b].some(p=>p.id===five[0].id),'equal choices prefer a different foursome while keeping the player due next');
+    // An even rematch beats lopsided teams: both even splits on cooldown would leave 4.2+4.2 v 2.6+2.6.
+    S={players:[4.2,4.2,2.6,2.6,...Array(8).fill(1)].map(pl),courts:[court('C1','doubles')],results:[],tournament:null};
+    const e=S.players.map(p=>p.id);
+    S.results=[{a:[e[0],e[3]],b:[e[1],e[2]],winner:0,start:0,end:1},{a:[e[0],e[2]],b:[e[1],e[3]],winner:0,start:0,end:1}];
+    for(let k=0;k<2;k++)for(const p of S.players.slice(4))S.results.push({a:[p.id],b:['ghost'],winner:0,start:0,end:1});
+    const evenGame=pick('doubles',S.players);
+    console.assert(evenGame&&evenGame.rematchFallback&&[...evenGame.a,...evenGame.b].map(p=>p.id).sort().join()===e.slice(0,4).sort().join()&&sum(evenGame.a)===sum(evenGame.b),'a balanced rematch is preferred to lopsided teams');
+    console.assert(evenGame&&automaticMatchupAllowed(evenGame.a.map(p=>p.id),evenGame.b.map(p=>p.id)),'Start accepts the balanced rematch');
+    // 3 levels to avoid repeats: four Low adv who have used every partnership play an even game 3 levels apart instead.
+    S={players:[4.2,4.2,4.2,4.2,1.8,1.8].map(pl),courts:[court('C1','doubles')],results:[],tournament:null};
+    const w=S.players.map(p=>p.id),g=(a,b)=>({a,b,winner:0,start:0,end:1});
+    S.results=[...[4,5].flatMap(i=>[0,1,2].map(()=>g([w[i]],['ghost']))),g([w[0],w[1]],[w[2],w[3]]),g([w[0],w[2]],[w[1],w[3]]),g([w[0],w[3]],[w[1],w[2]]),g(['ghost'],['ghost2'])];
+    const narrow=pick('doubles',S.players);
+    console.assert(narrow&&!isWide(narrow),'without the option a game stays within 2 levels');
+    S.wide=true;const wideGame=pick('doubles',S.players);
+    console.assert(wideGame&&isWide(wideGame)&&sum(wideGame.a)===sum(wideGame.b)&&[...wideGame.a,...wideGame.b].some(p=>p.id===w[0])&&/3 levels/.test(wideGame.note),'3 levels with even teams replaces a repeated foursome');
+    console.assert(wideGame&&skillRangeAllowed([...wideGame.a,...wideGame.b].map(p=>p.id)),'Start accepts the 3-level game');
+    delete S.wide;console.assert(wideGame&&!skillRangeAllowed([...wideGame.a,...wideGame.b].map(p=>p.id)),'turning the option off rejects a 3-level game');
+    // With nothing within 2 levels the court waits; with the option, 4.2+1.8 v 3.4+2.6 plays.
+    S={players:[4.2,3.4,2.6,1.8].map(pl),courts:[court('C1','doubles')],results:[],tournament:null};
+    console.assert(!pick('doubles',S.players),'four players 3 levels apart wait without the option');
+    S.wide=true;const lone=pick('doubles',S.players);
+    console.assert(lone&&sum(lone.a)===sum(lone.b),'four players 3 levels apart play even teams with the option');
+    S.players[3].skill=1;console.assert(!pick('doubles',S.players),'the option never goes past 3 levels or uneven teams');
+    S=keep;
+  }
   // Levels: seven fixed points, nearest level for old decimal ratings; matching reads the level.
   console.assert(PRESETS.every((x, i) => level(x) === i + 1) && level(4.68) === 6 && level(3.82) === 5 && level(5.8) === 7 && level(5) === 6 && level(5.12) === 6 && level(0.5) === 1, 'nearest level');
   // Standings: ranked from 75% of the median games played; correcting a winner leaves levels alone.

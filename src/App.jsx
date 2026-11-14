@@ -11,7 +11,7 @@ import { Sheets } from './Sheets';
 import { Confirm, Seg } from './bits';
 import { Button } from '@/components/ui/button';
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 
 export default function App() {
@@ -87,6 +87,8 @@ function Toolbar() {
           {!S.tournament && <>
             <DropdownMenuLabel>Auto matching</DropdownMenuLabel>
             <p className="max-w-[280px] px-2 py-2 text-xs text-muted-foreground">{matchingHelp()}</p>
+            <DropdownMenuCheckboxItem checked={!!S.wide} onSelect={e => e.preventDefault()}
+              onCheckedChange={on => act(() => { if (on) S.wide = true; else delete S.wide; })}>3 levels to avoid repeats</DropdownMenuCheckboxItem>
             <DropdownMenuItem onSelect={() => openModal({type:'howItWorks'})}>How the App Works</DropdownMenuItem>
             <DropdownMenuSeparator />
           </>}
