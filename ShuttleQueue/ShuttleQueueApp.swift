@@ -7,11 +7,12 @@ struct ShuttleQueueApp: App {
 
     init() {
         #if DEBUG
+        // Before the self-checks: an optimized (-O) bench build skips assert bodies, which some checks rely on.
+        if CommandLine.arguments.contains("-bench") { Simulation.bench(); return }
         SessionState.selfCheck()
         Simulation.selfCheck()
         print("DEBUG self-checks passed")
         if CommandLine.arguments.contains("-simulate") { Simulation.main() }
-        if CommandLine.arguments.contains("-bench") { Simulation.bench() }
         if CommandLine.arguments.contains("-waitsweep") { Simulation.waitSweep() }
         if CommandLine.arguments.contains("-parity") { Simulation.parity() }
         #endif
@@ -65,7 +66,6 @@ enum Preference: String, Codable, CaseIterable {
 }
 
 let skillNames = ["Low beginner", "High beginner", "Low interm", "High interm", "Low adv", "High adv", "Pro"]
-let skillShortNames = ["Low Beg", "High Beg", "Low Int", "High Int", "Low Adv", "High Adv", "Pro"] // on court cards
 // ponytail: levels stored as fixed points at the old scale’s spacing so matching constants and old saves keep working.
 // Seven levels, 0.8 apart; the organiser sets them and results never change them.
 let skillPresets = [1.0, 1.8, 2.6, 3.4, 4.2, 5.0, 5.8]
@@ -436,11 +436,12 @@ struct SessionState: Codable, Equatable, Identifiable {
     var hours: Double? // planned length
     var scheduled: [ScheduledMatch]?
     var queueMatching: QueueMatching? // nil keeps the original Auto matching
+    var wide: Bool? // "3 levels to avoid repeats": see wideSpread
     var scheduleUnlocked: Bool?
     var scheduledActive: UUID?
 
     var matchingMode: QueueMatching { queueMatching ?? .auto }
-    var matchingHelp: String { matchingMode.explanation + (matchingMode == .equalSkill ? (splitTiers ? " Groups are split now." : " Groups are together now (one has fewer than 4 players).") : "") }
+    var matchingHelp: String { (matchingMode == .auto && wide == true ? "Similar levels first: same or neighbouring level, then 2 levels apart. 3 levels apart only with exactly even teams, when every closer game would repeat a foursome or recent partners." : matchingMode.explanation) + (matchingMode == .equalSkill ? (splitTiers ? " Groups are split now." : " Groups are together now (one has fewer than 4 players).") : "") }
     static let idealPlayersPerDoublesCourt = 8
     static let topTier = 4.0 // Equal Skill: doubles players at 4.0+ play only each other; under 4.0, balanced games among themselves
     /// Equal Skill splits doubles at `topTier` only while each group has 4+ active doubles players (here, not sitting out,
@@ -458,12 +459,12 @@ struct SessionState: Codable, Equatable, Identifiable {
         return count > 0 && active < count * Self.idealPlayersPerDoublesCourt ? Self.widerSpread : Self.similarSpread
     }
     func waitingMessage(_ format: Format = .doubles) -> String {
-        matchingMode == .auto ? "Waiting for players within 2 levels of each other" :
+        matchingMode == .auto ? "Waiting for players within \(wide == true ? 3 : 2) levels of each other" :
         matchingMode == .equalSkill ? (format == .doubles ? "Waiting for 4 players from the same group (4.0+ or under 4.0)" : "Waiting for a legal group within " + String(format: "%.1f", matchingRange(format)) + " rating points") : "Waiting for available players"
     }
 
     func skillRangeAllowed(_ ids: [UUID]) -> Bool {
-        if matchingMode == .auto { let s = ids.map { matchSkill($0, format: ids.count == 2 ? .singles : .doubles) }; return (s.max() ?? 0) - (s.min() ?? 0) <= Self.maxSpread + 1e-9 }
+        if matchingMode == .auto { return Self.levelsAllowed(ids.map { matchSkill($0, format: ids.count == 2 ? .singles : .doubles) }, on: wide == true) }
         guard matchingMode == .equalSkill else { return true }
         guard ids.count == 2 else { return !splitTiers || Set(ids.map { matchSkill($0) >= Self.topTier }).count <= 1 }
         let skills = ids.map { matchSkill($0, format: .singles) }
@@ -536,14 +537,18 @@ struct SessionState: Codable, Equatable, Identifiable {
     }
     static func rematchAllowed(_ a: [UUID], _ b: [UUID], history: [String: String]? = nil) -> Bool {
         guard a.count == 2 && b.count == 2 else { return true }
-        let history = history ?? matchupHistory ?? [:], x = teamKey(a), y = teamKey(b)
+        let history = history ?? matchupHistory ?? [:]
+        guard !history.isEmpty else { return true }
+        let x = teamKey(a), y = teamKey(b)
         return history[x] != y && history[y] != x
     }
     func automaticMatchupAllowed(_ a: [UUID], _ b: [UUID]) -> Bool {
         guard a.count == 2 && b.count == 2 else { return true }
         if !Self.rematchAllowed(a,b,history:lastTeamOpponents) {
             let line = eligible(.doubles)
-            guard line.count <= Self.rematchFallbackPlayers, pick(.doubles, from: line)?.rematchFallback == true else { return false }
+            // Above the small-group size only the balanced-rematch fallback applies, and only for these four.
+            guard let p = pick(.doubles, from: line), p.rematchFallback,
+                  line.count <= Self.rematchFallbackPlayers || Set((p.a + p.b).map(\.id)) == Set(a + b) else { return false }
         }
         let locked = [a,b].allSatisfy { team in player(team[0])?.lock == team[1] && player(team[1])?.lock == team[0] }
         return !locked || !lockedRematchBlocked(a,b)
@@ -647,6 +652,20 @@ struct SessionState: Codable, Equatable, Identifiable {
     static let similarSpread = 1.0 // "similar" = all four within 1 level of each other
     static let widerSpread = 1.6   // 2 levels: tried when every similar group would repeat recent partners or opponents
     // ponytail: Auto never builds a game more than 2 levels wide (doubles or singles); the court waits instead. Raise it if waits get long.
+    // "3 levels to avoid repeats" (`wide`): a doubles game may be 3 levels wide, with exactly even teams, when every game within
+    // 2 levels would repeat a foursome or a recent partnership (or none can be made).
+    // ponytail: one retry of the whole pick, not a search stage; make it a stage if it should fire more often.
+    static let wideSpread = 2.4
+    static var wideOn = false // scoped to the wide retry of one automatic pick, like lockCtx
+    static func evenTeams(_ sk: [Double]) -> Bool {
+        let t = sk.sorted(by: >)
+        return min(abs(t[0] + t[3] - t[1] - t[2]), abs(t[0] + t[2] - t[1] - t[3]), abs(t[0] + t[1] - t[2] - t[3])) < 1e-9
+    }
+    static func levelsAllowed(_ sk: [Double], on: Bool = wideOn) -> Bool {
+        let r = (sk.max() ?? 0) - (sk.min() ?? 0)
+        return r <= maxSpread + 1e-9 || on && sk.count == 4 && r <= wideSpread + 1e-9 && evenTeams(sk)
+    }
+    static func isWide(_ a: [Player], _ b: [Player]) -> Bool { let sk = (a + b).map(\.skill); return (sk.max() ?? 0) - (sk.min() ?? 0) > maxSpread + 1e-9 }
     static let maxSpread = 1.6
     // Nobody should wait longer than `waitCap`. Anyone who has waited `waitPriority` (a little less, since a court still has to
     // free up) plays in the next game, and that game may stretch to `overdueSpread` levels with balanced teams at worst.
@@ -679,7 +698,7 @@ struct SessionState: Codable, Equatable, Identifiable {
     typealias Pick = (splits: [(a: [Player], b: [Player])], penalty: Int, justOff: Int)
 
     static func bestFour(_ q: [Player], pool: [Int], recent: Recent, justOff: Set<UUID>, bySpread: Bool = false,
-                         must: Int = 1, games: [UUID: Int] = [:], heavyFirst: Bool = false, splitTiers: Bool = false,
+                         must: Int = 1, games: [UUID: Int] = [:], heavyFirst: Bool = false, splitTiers: Bool = false, fours: Set<Set<UUID>> = [],
                          allowed: ([Player]) -> Bool) -> Pick? {
         guard pool.count >= 3 else { return nil }
         var best: (key: [Int], splits: [(a: [Player], b: [Player])], penalty: Int)?
@@ -691,10 +710,10 @@ struct SessionState: Codable, Equatable, Identifiable {
                 for i in 0..<j {
                     let picked = [pool[i], pool[j], pool[k]], four = [q[0]] + picked.map { q[$0] }
                     guard (1..<must).allSatisfy(picked.contains), allowed(four), lk.isEmpty || lockMembers(ids(four), lk) else { continue }
+                    guard !four.contains(where: { justOff.contains($0.id) && games[$0.id,default:0] > limits[$0.id,default:0] }) else { continue }
                     let fair = fairSplits(four).filter { s in rematchAllowed(ids(s.a),ids(s.b))
                         && (lk.isEmpty || keepsLocks(ids(s.a), ids(s.b), lk, strict: lockCtx!.strict, real: lockCtx!.real, opponents: lockCtx!.opponents, rested: lockCtx!.rested)) }
                     guard !fair.isEmpty else { continue }
-                    guard !four.contains(where: { justOff.contains($0.id) && games[$0.id,default:0] > limits[$0.id,default:0] }) else { continue }
                     let splits = fair.enumerated().map { (r: repeats($0.element.a, $0.element.b, recent), o: $0.offset, sp: $0.element) }.sorted {
                         let x = abs($0.sp.a.map(\.skill).reduce(0,+) - $0.sp.b.map(\.skill).reduce(0,+))
                         let y = abs($1.sp.a.map(\.skill).reduce(0,+) - $1.sp.b.map(\.skill).reduce(0,+))
@@ -704,7 +723,14 @@ struct SessionState: Codable, Equatable, Identifiable {
                     let range = four.map(\.skill).max()! - four.map(\.skill).min()!
                     let off = four.filter { justOff.contains($0.id) }.count
                     let played = picked.reduce(0) { $0 + games[q[$1].id,default:0] }
-                    let key = [off] + (bySpread ? [Int((range*4).rounded())] : []) + [played, rep] + (bySpread ? [Int((range*100).rounded())] : []) + [pool[k],picked.reduce(0,+)]
+                    let sumA: Double = splits[0].sp.a.map(\.skill).reduce(0, +), sumB: Double = splits[0].sp.b.map(\.skill).reduce(0, +)
+                    let balance = fours.isEmpty ? 0 : Int((abs(sumA - sumB) * 100).rounded())
+                    let repeatedFour = fours.contains(Set(four.map(\.id))) ? 1 : 0
+                    var key: [Int] = [off]
+                    if bySpread { key.append(Int((range*4).rounded())) }
+                    key += [played, rep]
+                    if bySpread { key.append(Int((range*100).rounded())) }
+                    key += [balance, repeatedFour, pool[k], picked.reduce(0, +)]
                     if best.map({ key.lexicographicallyPrecedes($0.key) }) ?? true { best = (key, splits.map(\.sp), rep) }
                 }
             }
@@ -720,7 +746,7 @@ struct SessionState: Codable, Equatable, Identifiable {
     /// `accept`: an extra test every four must pass.
     static func pickDoubles(_ q: [Player], choice: Int = 0, recent: Recent = [:], must: Int = 1, justOff: Set<UUID> = [],
                             accept: ([Player]) -> Bool = { _ in true },
-                            capSpread: Double? = nil, games: [UUID: Int] = [:], balancedOnly: Bool = false, searchLimit: Int = 12, splitTiers: Bool = false, similarRange: Double = Self.similarSpread) -> Pairing? {
+                            capSpread: Double? = nil, games: [UUID: Int] = [:], balancedOnly: Bool = false, searchLimit: Int = 12, splitTiers: Bool = false, similarRange: Double = Self.similarSpread, fours: Set<Set<UUID>> = []) -> Pairing? {
         guard q.count >= 4, let head = q.first else { return nil }
         // How far a pick falls short: players straight off court first (rest beats skill match), then repeats past the limit.
         func shortfall(_ g: Pick?) -> [Int] {
@@ -732,9 +758,11 @@ struct SessionState: Codable, Equatable, Identifiable {
         }
         func similarGroup(_ spread: Double) -> Pick? {
             let near = Array(Set(1..<must).union(q.indices.dropFirst().filter { abs(q[$0].skill - head.skill) <= spread + 1e-9 }.prefix(searchLimit))).sorted()
-            return bestFour(q, pool: near, recent: recent, justOff: justOff, must: must, games: games, splitTiers: splitTiers) { four in
-                let s = four.map(\.skill), t = fairSplits(four)[0]
-                return s.max()! - s.min()! <= spread + 1e-9 && abs(t.a.map(\.skill).reduce(0, +) - t.b.map(\.skill).reduce(0, +)) / 2 <= fairGap + 1e-9 && accept(four)
+            return bestFour(q, pool: near, recent: recent, justOff: justOff, must: must, games: games, splitTiers: splitTiers, fours: fours) { four in
+                let s = four.map(\.skill)
+                guard s.max()! - s.min()! <= spread + 1e-9, accept(four) else { return false } // cheap tests first
+                let t = fairSplits(four)[0]
+                return abs(t.a.map(\.skill).reduce(0, +) - t.b.map(\.skill).reduce(0, +)) / 2 <= fairGap + 1e-9
             }
         }
         let fine = [0, 0]
@@ -748,10 +776,11 @@ struct SessionState: Codable, Equatable, Identifiable {
         // nothing at all is free, so the waiting player still plays.
         func balanced(_ cap: Double?) -> Pick? {
             bestFour(q, pool: Array(1..<min(searchLimit, q.count)), recent: recent, justOff: justOff, bySpread: !balancedOnly, must: must,
-                     games: games, heavyFirst: balancedOnly, splitTiers: splitTiers) { four in
-                let t = fairSplits(four)[0], s = four.map(\.skill)
-                return abs(t.a.map(\.skill).reduce(0, +) - t.b.map(\.skill).reduce(0, +)) / 2 <= fairGap && accept(four)
-                    && cap.map { s.max()! - s.min()! <= $0 + 1e-9 } ?? true
+                     games: games, heavyFirst: balancedOnly, splitTiers: splitTiers, fours: fours) { four in
+                let s = four.map(\.skill)
+                guard accept(four), cap.map({ s.max()! - s.min()! <= $0 + 1e-9 }) ?? true else { return false } // cheap tests first
+                let t = fairSplits(four)[0]
+                return abs(t.a.map(\.skill).reduce(0, +) - t.b.map(\.skill).reduce(0, +)) / 2 <= fairGap
             }
         }
         if shortfall(best) != fine, let b = balanced(capSpread) ?? (best == nil && capSpread != nil ? balanced(nil) : nil),
@@ -804,11 +833,38 @@ struct SessionState: Codable, Equatable, Identifiable {
         let old = Self.matchupHistory
         Self.matchupHistory = lastTeamOpponents
         defer { Self.matchupHistory = old }
-        if let p = pickAvailable(format, from: line, choice: choice) { return p }
+        var normal = pickAvailable(format, from: line, choice: choice)
+        let full = format == .doubles && line.count == eligible(format).count
+        func gap(_ p: Pairing) -> Double { abs(p.a.map(\.skill).reduce(0, +) - p.b.map(\.skill).reduce(0, +)) }
+        func lopsided(_ p: Pairing) -> Bool { p.a.count == 2 && gap(p) / 2 > Self.fairGap + 1e-9 }
+        // 3 levels to avoid repeats: when the game within 2 levels is missing, lopsided or a repeat, look again up to 3 levels with even teams.
+        if format == .doubles, wide == true, matchingMode == .auto {
+            func repeating(_ p: Pairing) -> Bool {
+                let four = Set((p.a + p.b).map(\.id))
+                return games.contains { $0.teamA.count == 2 && Set($0.teamA + $0.teamB) == four } || Self.repeats(p.a, p.b, recentPairs()) > 0
+            }
+            let poor = normal.map(lopsided) ?? true
+            if poor || repeating(normal!) {
+                Self.wideOn = true
+                var w = pickAvailable(format, from: line, choice: choice)
+                Self.wideOn = false
+                if let found = w, Self.isWide(found.a, found.b), gap(found) < 1e-9, poor || !repeating(found) {
+                    w!.note = [found.note, "3 levels apart, even teams"].compactMap { $0 }.joined(separator: " · ")
+                    normal = w
+                }
+            }
+        }
+        // An even rematch beats lopsided teams: when the cooldown leaves only an unbalanced game, retry without it.
+        if let normal, !(full && lopsided(normal)) { return normal }
         // A small waiting group can exhaust its exact-team opponents; keep every other protection on retry.
-        guard format == .doubles, line.count <= Self.rematchFallbackPlayers, line.count == eligible(format).count else { return nil }
+        guard full, normal != nil || line.count <= Self.rematchFallbackPlayers else { return nil }
+        let history = Self.matchupHistory
         Self.matchupHistory = [:]
-        guard var p = pickAvailable(format, from: line, choice: choice) else { return nil }
+        guard var p = pickAvailable(format, from: line, choice: choice) else { return normal }
+        if let normal { // keep the lopsided game unless the retry is balanced, and only call it a repeat if it is one
+            if lopsided(p) { return normal }
+            if Self.rematchAllowed(p.a.map(\.id), p.b.map(\.id), history: history) { return p }
+        }
         p.rematchFallback = true
         p.note = [p.note, "teams repeated to keep the court playing"].compactMap { $0 }.joined(separator: " · ")
         return p
@@ -923,7 +979,11 @@ struct SessionState: Codable, Equatable, Identifiable {
         let off = Set(games.last.map { $0.teamA + $0.teamB } ?? [])
         let recent = format == .doubles ? recentPairs() : [:], must = max(1, overdue.count)
         // Equal Skill's under-4.0 group plays balanced games, like Balanced Skill.
-        let balanced = format == .doubles && (balancedOnly || split && (pool.first?.skill ?? Self.topTier) < Self.topTier)
+        let catchUp = format == .doubles && matchingMode == .auto && pool.contains { p in
+            (n[p.id] ?? 0) > (n[pool.first!.id] ?? 0) && abs(p.skill - pool.first!.skill) <= Self.maxSpread + 1e-9
+        }
+        let fours = Set(games.filter { $0.teamA.count == 2 && $0.teamB.count == 2 }.map { Set($0.teamA + $0.teamB) })
+        let balanced = format == .doubles && (catchUp || balancedOnly || split && (pool.first?.skill ?? Self.topTier) < Self.topTier)
         let cap = overdue.isEmpty ? nil : Self.overdueSpread // an overdue game may stretch to 2 levels, balanced, at worst
         // At most 2 late arrivals on their first game in one game, so a wave of arrivals doesn't take over a court.
         let newIDs = Set(line.filter(isNewcomer).map(\.id))
@@ -931,20 +991,20 @@ struct SessionState: Codable, Equatable, Identifiable {
         // Even games: nobody plays while someone with fewer games is left waiting (a late arrival counts at par), so similar-skill
         // groups don't leave anyone 2 games behind.
         var even = format == .doubles
-        let finalPool = pool
+        // The five fewest-games players in the pool: the lowest count outside any four is among them (no per-four scan).
+        let lowest = pool.map { (id: $0.id, n: n[$0.id] ?? 0) }.sorted { $0.n < $1.n }.prefix(5)
         let capped = matchingMode == .auto
         let fewNew = { (four: [Player]) -> Bool in
-            if capped, let hi = four.map(\.skill).max(), let lo = four.map(\.skill).min(), hi - lo > Self.maxSpread + 1e-9 { return false }
+            if capped, !Self.levelsAllowed(four.map(\.skill)) { return false }
             if limitNew && four.filter({ newIDs.contains($0.id) }).count > Self.latePerGame { return false }
             guard even else { return true }
-            let ids = Set(four.map(\.id))
-            guard let low = finalPool.filter({ !ids.contains($0.id) }).map({ n[$0.id] ?? 0 }).min() else { return true }
+            guard let low = lowest.first(where: { l in !four.contains { $0.id == l.id } })?.n else { return true }
             return four.allSatisfy { (n[$0.id] ?? 0) <= low }
         }
         func doubles(_ choice: Int) -> Pairing? {
             // Search the whole waiting line while mixing arrivals, so a wave cannot hide the regulars.
             Self.pickDoubles(pool, choice: choice, recent: recent, must: must, justOff: off, accept: fewNew, capSpread: cap,
-                             games: n, balancedOnly: balanced, searchLimit: limitNew ? pool.count : 12, splitTiers: split, similarRange: matchingRange(format))
+                             games: n, balancedOnly: balanced, searchLimit: limitNew || catchUp ? pool.count : 12, splitTiers: split, similarRange: matchingRange(format), fours: fours)
         }
         let singlesCap = matchingMode == .equalSkill ? Self.singlesRange : matchingMode == .auto ? Self.maxSpread : nil
         let singlesPool = singlesCap.map { cap in pool.filter { abs($0.skill - (pool.first?.skill ?? $0.skill)) <= cap + 1e-9 } } ?? pool
@@ -972,7 +1032,8 @@ struct SessionState: Codable, Equatable, Identifiable {
 
     func rotateTeams(_ p: Pairing, choice: Int) -> Pairing {
         let all = Self.fairSplits(p.a + p.b).filter { t in
-            guard abs(t.a.map(\.skill).reduce(0,+) - t.b.map(\.skill).reduce(0,+))/2 <= Self.fairGap + 1e-9 else { return false }
+            let gap = abs(t.a.map(\.skill).reduce(0,+) - t.b.map(\.skill).reduce(0,+))
+            guard gap/2 <= Self.fairGap + 1e-9, !Self.isWide(t.a, t.b) || gap < 1e-9 else { return false }
             guard Self.rematchAllowed(t.a.map(\.id),t.b.map(\.id)) else { return false }
             guard let c = Self.lockCtx else { return true }
             return Self.keepsLocks(t.a.map(\.id),t.b.map(\.id),c.locks,strict:true,real:c.real,opponents:c.opponents,rested:c.rested)
@@ -1685,7 +1746,7 @@ struct SessionState: Codable, Equatable, Identifiable {
                        away: true, rated: p.rated.map { $0 + played(p.id) }, lock: p.lock.flatMap { ids[$0] })
             } : [],
             courts: courts.map { Court(name: $0.name, format: $0.format) },
-            queueMatching: queueMatching
+            queueMatching: queueMatching, wide: wide
         )
     }
 
@@ -2317,6 +2378,48 @@ struct SessionState: Codable, Equatable, Identifiable {
                "late arrivals: 4 go first, then at par")
         let waveGame = wave.pick(.doubles, from: wave.queue)!
         assert((waveGame.a + waveGame.b).filter { $0.name.hasPrefix("L") }.count <= latePerGame, "at most 2 late arrivals on their first game in one game")
+        // A player one game behind searches beyond the usual candidate window before giving others another turn.
+        var catchupSearch = SessionState(players: ([4.2] + Array(repeating: 4.2, count: 11) + [3.4,3.4,3.4]).enumerated().map { Player(name: "Catch\($0.offset)", skill: $0.element) })
+        for p in catchupSearch.players[1..<12] { catchupSearch.results.append(GameResult(teamA: [p.id], teamB: [UUID()], winner: 0, court: "", start: now)) }
+        let caught = catchupSearch.pick(.doubles, from: catchupSearch.players)!
+        assert(Set((caught.a+caught.b).map(\.id)) == Set(([catchupSearch.players[0]] + catchupSearch.players.suffix(3)).map(\.id)), "a behind player searches the whole compatible queue before relaxing equal game counts")
+        let five = (0..<5).map { Player(name: "Fresh\($0)", skill: 3.4) }, oldFour = Set(five.prefix(4).map(\.id))
+        let freshFour = pickDoubles(five, fours: [oldFour])!
+        assert(Set((freshFour.a+freshFour.b).map(\.id)) != oldFour && (freshFour.a+freshFour.b).contains { $0.id == five[0].id }, "equal choices prefer a different foursome while keeping the player due next")
+        // An even rematch beats lopsided teams: both even splits on cooldown would leave 4.2+4.2 v 2.6+2.6.
+        var evenRematch = SessionState(players: ([4.2, 4.2, 2.6, 2.6] + Array(repeating: 1.0, count: 8)).enumerated().map { Player(name: "Even\($0.offset)", skill: $0.element) })
+        let er = evenRematch.players.map(\.id)
+        evenRematch.results = [GameResult(teamA: [er[0], er[3]], teamB: [er[1], er[2]], winner: 0, court: "", start: now),
+                               GameResult(teamA: [er[0], er[2]], teamB: [er[1], er[3]], winner: 0, court: "", start: now)]
+        for _ in 0..<2 { for p in evenRematch.players[4...] { evenRematch.results.append(GameResult(teamA: [p.id], teamB: [UUID()], winner: 0, court: "", start: now)) } }
+        let evenGame = evenRematch.pick(.doubles, from: evenRematch.players)!
+        let evenIDs = Set((evenGame.a + evenGame.b).map(\.id)), evenA: Double = evenGame.a.map(\.skill).reduce(0, +), evenB: Double = evenGame.b.map(\.skill).reduce(0, +)
+        assert(evenGame.rematchFallback && evenIDs == Set(er.prefix(4)) && evenA == evenB, "a balanced rematch is preferred to lopsided teams")
+        assert(evenRematch.automaticMatchupAllowed(evenGame.a.map(\.id), evenGame.b.map(\.id)), "Start accepts the balanced rematch")
+        // 3 levels to avoid repeats: four Low adv who have used every partnership play an even game 3 levels apart instead.
+        var wideCheck = SessionState(players: [4.2, 4.2, 4.2, 4.2, 1.8, 1.8].enumerated().map { Player(name: "Wide\($0.offset)", skill: $0.element) })
+        let wd = wideCheck.players.map(\.id)
+        func wg(_ a: [UUID], _ b: [UUID]) -> GameResult { GameResult(teamA: a, teamB: b, winner: 0, court: "", start: now) }
+        for i in [4, 5] { for _ in 0..<3 { wideCheck.results.append(wg([wd[i]], [UUID()])) } }
+        wideCheck.results += [wg([wd[0], wd[1]], [wd[2], wd[3]]), wg([wd[0], wd[2]], [wd[1], wd[3]]), wg([wd[0], wd[3]], [wd[1], wd[2]]), wg([UUID()], [UUID()])]
+        let narrow = wideCheck.pick(.doubles, from: wideCheck.players)!
+        assert(!isWide(narrow.a, narrow.b), "without the option a game stays within 2 levels")
+        wideCheck.wide = true
+        let wideGame = wideCheck.pick(.doubles, from: wideCheck.players)!
+        let wideA: Double = wideGame.a.map(\.skill).reduce(0, +), wideB: Double = wideGame.b.map(\.skill).reduce(0, +), wideIDs = (wideGame.a + wideGame.b).map(\.id)
+        assert(isWide(wideGame.a, wideGame.b) && wideA == wideB && wideIDs.contains(wd[0]) && (wideGame.note ?? "").contains("3 levels"), "3 levels with even teams replaces a repeated foursome")
+        assert(wideCheck.skillRangeAllowed(wideIDs), "Start accepts the 3-level game")
+        wideCheck.wide = nil
+        assert(!wideCheck.skillRangeAllowed(wideIDs), "turning the option off rejects a 3-level game")
+        // With nothing within 2 levels the court waits; with the option, 4.2+1.8 v 3.4+2.6 plays.
+        var lone = SessionState(players: [4.2, 3.4, 2.6, 1.8].enumerated().map { Player(name: "Lone\($0.offset)", skill: $0.element) })
+        assert(lone.pick(.doubles, from: lone.players) == nil, "four players 3 levels apart wait without the option")
+        lone.wide = true
+        let loneGame = lone.pick(.doubles, from: lone.players)
+        let loneA: Double = loneGame?.a.map(\.skill).reduce(0, +) ?? 0, loneB: Double = loneGame?.b.map(\.skill).reduce(0, +) ?? 1
+        assert(loneA == loneB, "four players 3 levels apart play even teams with the option")
+        lone.players[3].skill = 1
+        assert(lone.pick(.doubles, from: lone.players) == nil, "the option never goes past 3 levels or uneven teams")
         // Levels: seven fixed points, nearest level for old decimal ratings; matching reads the level.
         assert(skillPresets.enumerated().allSatisfy { levelOf($0.element) == $0.offset + 1 } && levelOf(4.68) == 6 && levelOf(3.82) == 5 && levelOf(5.8) == 7 && levelOf(5) == 6 && levelOf(5.12) == 6 && levelOf(0.5) == 1, "nearest level")
         let lv = SessionState(players: [Player(name: "L", skill: 3.82)])
@@ -2601,6 +2704,7 @@ enum Simulation {
         guard var s = input()?.current else { return }
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-queue-matching"), i + 1 < args.count, let mode = QueueMatching(rawValue: args[i+1]) { s.queueMatching = mode }
+        if args.contains("-wide") { s.wide = true } // 3 levels to avoid repeats
         let courts = args.firstIndex(of: "-courts").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil } ?? 3
         let t0 = Date(timeIntervalSinceReferenceDate: 0)
         s.results = []; s.tournament = nil
@@ -2680,10 +2784,13 @@ enum Simulation {
     static func bench() {
         guard var s = input()?.current else { return }
         let t0 = Date(timeIntervalSinceReferenceDate: 0)
-        s.results = []; s.tournament = nil
+        s.results = []; s.tournament = nil; s.ended = nil; s.scheduled = nil // an ended session never starts games
         s.courts = (1...2).map { Court(name: "Court \($0)", format: .doubles) }
         s.players = s.players.enumerated().map { n, p in var q = p; q.readyAt = t0.addingTimeInterval(Double(n)); q.since = nil; q.paused = false; q.away = nil; return q }
         var t = t0
+        SessionState.simulatedNow = t
+        let clock = ContinuousClock(), runs = 20
+        let start = clock.measure { for _ in 0..<runs { _ = s.openCourtPairings(s.upNext) } } / runs // nobody has played, every court open
         for g in 0..<10 { // an hour of games, so repeat and rest rules have history to check
             SessionState.simulatedNow = t
             for c in s.courts where c.match == nil { s.fill(c.id, at: t) }
@@ -2691,10 +2798,9 @@ enum Simulation {
             s.finish(s.courts[g % 2].id, winner: g % 2, at: t)
         }
         SessionState.simulatedNow = t
-        let clock = ContinuousClock(), runs = 20
         let screen = clock.measure { for _ in 0..<runs { _ = s.openCourtPairings(s.upNext) } } / runs // what one screen update computes
         let tap = clock.measure { for _ in 0..<runs { var x = s; x.shuffle(x.courts.first { $0.match == nil }!.id); _ = x.upNext } } / runs
-        let out = "players \(s.players.count), games \(s.results.count)\nscreen update (every court's next game + Up Next): \(screen)\nshuffle tap: \(tap)\n"
+        let out = "players \(s.players.count), games \(s.results.count)\nscreen update before the first game: \(start)\nscreen update (every court's next game + Up Next): \(screen)\nshuffle tap: \(tap)\n"
         try? out.write(to: URL.documentsDirectory.appending(path: "bench.txt"), atomically: true, encoding: .utf8)
         print(out)
         SessionState.simulatedNow = nil

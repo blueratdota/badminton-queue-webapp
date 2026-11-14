@@ -27,7 +27,7 @@ Current iPad app screens with a fictional demo roster. Players have seven organi
 
 ## Queue matching
 
-Auto prefers players at the same or neighbouring levels, then up to two levels apart. Automatic games never exceed that limit; a court waits when no legal group is available. Game counts, rest, teammate locks, and partnership rotation guide the picks. Manual lineups and exact scheduled games retain their overrides.
+Auto prefers players at the same or neighbouring levels, then up to two levels apart. Automatic games never exceed that limit; a court waits when no legal group is available. An optional **3 levels to avoid repeats** setting (off by default) allows a doubles game 3 levels apart with exactly even teams when every closer game would repeat a foursome or recent partners. Game counts, rest, teammate locks, partnership rotation and a preference for new foursomes guide the picks; a player who is a game behind searches the whole compatible queue. Manual lineups and exact scheduled games retain their overrides.
 
 Players have seven fixed levels: **Low beginner, High beginner, Low interm, High interm, Low adv, High adv, Pro**. Only the organiser changes a level. Results can trigger a level review suggestion after enough evidence across multiple sessions; they never change levels automatically. Existing players retain their level position when names change; the former top level becomes High adv, with Pro added above it.
 

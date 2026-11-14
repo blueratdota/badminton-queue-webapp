@@ -299,6 +299,7 @@ struct NewSessionSheet: View {
         // Locked teammates carry over from the copied session when both partners come along.
         if let src = sessions.first(where: { $0.id == source }) {
             x.queueMatching = src.queueMatching
+            x.wide = src.wide
             let byName = { (n: String) in x.players.first { $0.name.lowercased() == n.lowercased() } }
             for p in src.players {
                 guard let mate = p.lock.flatMap(src.player), let a = byName(p.name), let b = byName(mate.name) else { continue }
@@ -379,6 +380,7 @@ struct SettingsSheet: View {
                     Section {
                         // ponytail: Equal Skill and Balanced Skill pickers hidden for now; the code paths stay.
                         Button("How Matching Works", systemImage: "questionmark.circle") { showHow = true }
+                        Toggle("3 levels to avoid repeats", isOn: Binding(get: { s.wide == true }, set: { s.wide = $0 ? true : nil }))
                     } header: { Text("Queue matching") } footer: { Text(s.matchingHelp) }
                 }
                 Section("Courts") {
@@ -1469,7 +1471,7 @@ struct CourtDrawing: View {
                 ForEach(players) { p in
                     let label = VStack(spacing: 2) {
                         Text(p.name).font((isPreview ? Font.title : .title2).weight(.semibold)).lineLimit(2).multilineTextAlignment(.center)
-                        Text(skillShortNames[p.level - 1] + SkillDots.marker(streak(p.id))).font(.subheadline.weight(.medium)).foregroundStyle(.white.opacity(0.85))
+                        SkillDots(skill: p.skill, tint: .white, streak: streak(p.id)).padding(.vertical, -4)
                     }
                     if let onTap {
                         Button { onTap(p) } label: { label.padding(.horizontal, 8).contentShape(Rectangle()) }
@@ -2187,11 +2189,12 @@ struct HowItWorksSheet: View {
     static let matching = [
         "Tries four players at the **same or neighbouring levels**, then up to **2 levels** apart.",
         "**Never more than 2 levels apart:** if no such four are free, the court waits. Singles opponents are also within 2 levels.",
-        "Rest and fair game counts come before a close skill match.",
+        "**3 levels to avoid repeats** (Session Settings, off by default): a doubles game may be 3 levels apart with exactly even teams, only when every closer game would repeat a foursome or recent partners.",
+        "Rest and fair game counts come before a close skill match. If the player due next is a game behind, search the full compatible queue.",
     ]
     static let allModes = [
         "Teams aim for averages within about one level; if that's impossible, the fairest split.",
-        "The exact same teams don't face each other twice in a row.",
+        "The exact same teams don't face each other twice in a row. When rest, game counts and balance tie, prefer a different group of four.",
         "Locked teammates stay together, within the 2-level limit. Choose Players and Scheduled Matches override the automatic picks.",
     ]
     static let ratings = [
