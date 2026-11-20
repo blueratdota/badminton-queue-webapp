@@ -19,7 +19,7 @@ Current iPad app screens with a fictional demo roster. Players have seven organi
 - **Auto matching:** same or neighbouring levels first, then up to two levels apart. Equal Skill and Balanced Skill are hidden for now.
 - **Control when you need it:** shuffle a lineup, keep one side, replace a player, select a manual lineup, or lock regular teammates together.
 - **Scheduled matches:** reserve exact teams after their first game, with court assignment, postponement, cancellation, and queue-priority protections.
-- **Levels and standings:** seven organiser-set levels, level review suggestions, display-only streak markers, match history, and standings.
+- **Levels and standings:** seven organiser-set levels, level review suggestions, streak markers (a 3-win streak can also play one level up), match history, and standings.
 - **Tournament play:** round robin followed by a double-elimination bracket, for singles or doubles.
 - **Session management:** create, end, reopen, and revisit sessions; maintain a player registry across nights.
 - **Local data:** the iPad saves on-device; the hosted web app saves in the current browser and supports JSON export/import.
