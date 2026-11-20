@@ -164,7 +164,8 @@ Queue matching is **Auto**. The Equal Skill and Balanced Skill modes are **hidde
   - **Starting fresh:** any level change (from a check, Edit Player or All Players) starts the count again; only later games count. Saves from before level checks count all their history.
   - **How sure it is:** in doubles, one player a level better only lifts their team from even to about a 61% favourite, so it takes many games to tell skill from luck. Simulating 20 nights of the Bworld roster (3 courts, 3 hours) with 6 players set one level off, a check usually appeared after **8–14 nights** (some not within 20), and correctly-levelled players were flagged by luck **under once per 10 nights**. A shorter count (20 games) caught players sooner but flagged the wrong people about 4 times as often. `tools/web-levels.js` reruns this.
 - **Older saves:** decimal ratings from before levels are moved to their **nearest level** when the app opens; old stored rating changes are ignored.
-- **Streak markers only:** three or more consecutive wins show **🔥**; three or more consecutive losses show **🧊**, at every level. Dots keep their ordinary colors and level fill. Cancellations do not count or break a streak; corrections and deletions recalculate markers. Streaks never adjust levels or preferentially pair hot/cold players. The separate three-win cooldown for locked teammates still applies.
+- **Streak markers:** three or more consecutive wins show **🔥**; three or more consecutive losses show **🧊**, at every level. Dots keep their ordinary colors and level fill. Cancellations do not count or break a streak; corrections and deletions recalculate markers. Streaks never change anyone's saved level or preferentially pair hot/cold players.
+- **Playing up on a win streak (Auto, doubles):** a player on **3 or more wins in a row** can be matched at their own level **or one level higher**. For each possible group of four, they count at whichever of the two keeps the four closest together (own level on a tie), and that level is used for the 2-level limit and for balancing teams. Example: a High beginner on a streak can play three Low adv (counted as a Low interm), which is otherwise more than 2 levels apart. The court shows “<name> playing up (win streak)”. One loss ends it. Pro can't go higher. Losing streaks change nothing; singles and locked-team searches use own levels. The separate three-win cooldown for locked teammates still applies.
 
 ## 11. Standings
 
@@ -212,6 +213,7 @@ Queue matching is **Auto**. The Equal Skill and Balanced Skill modes are **hidde
 | Overdue priority and wait notes | paused; normal wait tie-break retained |
 | Late arrivals | 30-minute grace period; afterward first 4 waiting go first, the rest at par; at most 2 first-game arrivals per balanced game when a legal mixed game exists; relax equal counts before this limit |
 | Recall lead limit | normally zero; with fewer than four rested players, the smallest lead needed to fill four slots |
+| Playing up on a win streak | 3 wins in a row (`streakLength`); one level up, doubles only |
 | 3 levels to avoid repeats | optional; up to 3 levels (`wideSpread` 2.4) with exactly even teams |
 | Exact-team rematch cooldown | both exact doubles teams must complete one game against another team; fallback when no game is possible and the full eligible waiting line has at most 8 players (`rematchFallbackPlayers`), or at any size when the only game left would not be balanced |
 | Locked-team rematch cooldown | two other completed games per participant; automatic games only |
